@@ -463,9 +463,15 @@ void update_platform_pointer_capture() {
     // window's resize edges remain reachable.
     int bw, bh, dw, dh;
     window_sizes(&bw, &bh, &dw, &dh);
+#ifdef __EMSCRIPTEN__
+    // Browser canvas events deliver window-relative coordinates directly;
+    // SDL_GetGlobalMouseState / SDL_SetWindowMouseRect are not supported.
+    HostRect rect{};
+#else
     HostRect rect = host_pointer_confinement_wanted(hide_cursor, g_window_mode) && g_window
                         ? host_pointer_confinement_rect({0, 0, double(bw), double(bh)})
                         : HostRect{};
+#endif
     if (g_window && (rect.x != g_pointer_confinement.x || rect.y != g_pointer_confinement.y ||
                      rect.w != g_pointer_confinement.w || rect.h != g_pointer_confinement.h)) {
         if (rect.empty())

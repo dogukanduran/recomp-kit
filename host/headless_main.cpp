@@ -37,13 +37,13 @@
 #include "audio_capture.h"
 #include "../platform/os.h"
 #include "boot.h"
-#include "input.h"
 #include "page_overlay.h"
 #include "../runtime/guest.h"
 #include "../runtime/loader.h"
 #include "../runtime/win32.h"
 #include "../runtime/gdi32_internal.h"
 #include "../dx/host_api.h"
+#include "../dx/dx.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -99,13 +99,14 @@ void parse_clicks(const char *spec) {
     }
 }
 
-// RECOMP_KEY_AT="frame:mac_keycode:down(0/1),..." injects keyboard events.
+// RECOMP_KEY_AT="frame:dik:down(0/1),..." injects DirectInput + Win32 keyboard events.
 struct ScheduledKey {
     uint32_t frame;
     uint16_t key;
     bool down;
 };
 std::vector<ScheduledKey> g_key_events;
+uint8_t g_headless_keys[256] = {};
 void parse_keys(const char *spec) {
     if (!spec)
         return;
@@ -132,9 +133,17 @@ void maybe_fire_clicks(uint32_t frame) {
         return;
     for (const auto &k : g_key_events)
         if (frame == k.frame) {
-            printf("[host] key %02x %s on frame %u\n", k.key, k.down ? "down" : "up", frame);
+            printf("[host] key dik=0x%02x %s on frame %u\n", k.key, k.down ? "down" : "up", frame);
             fflush(stdout);
-            host_input_key(k.key, k.down);
+            if (k.key < 256)
+                g_headless_keys[k.key] = k.down ? 0x80 : 0x00;
+            // Map common DIKs (Space=0x39, Return=0x1c) to VK for Win32 message/GetAsyncKeyState.
+            int vk = k.key == 0x39 ? 0x20 : (k.key == 0x1c ? 0x0d : (int)k.key);
+            host_set_key_state(vk, k.down);
+            host_post_key_message(k.down ? 0x0100 /* WM_KEYDOWN */ : 0x0101 /* WM_KEYUP */,
+                                  (uint32_t)vk, (uint32_t)((k.key & 0xffu) << 16) | (k.down ? 1u : 0xc0000001u),
+                                  k.down && vk == 0x20 ? ' ' : 0);
+            dinput_host_input_changed();
         }
     for (const auto &cl : g_clicks) {
         if (frame == cl.frame) {
@@ -566,10 +575,10 @@ void audio_offline_end() {
 } // namespace
 
 extern "C" void host_input_state(HostInputState *out) {
-    // No mouse, no keyboard: a session where nobody touches anything. Zeroing
-    // is what DirectInput reports for an idle device, and it is the truth here.
-    if (out)
+    if (out) {
         memset(out, 0, sizeof *out);
+        memcpy(out->keys, g_headless_keys, sizeof out->keys);
+    }
 }
 
 namespace {

@@ -13,6 +13,9 @@ uint32_t sched_free_run_leave();
 #include <cstdio>
 #include <map>
 #include <vector>
+#if !defined(__wasm__) && !defined(_WIN32)
+#include <execinfo.h>
+#endif
 
 namespace {
 constexpr uint32_t END_CHAIN = 0xffffffffu;
@@ -100,8 +103,27 @@ void trace_frames(X86 *c, const char *phase) {
 }
 
 [[noreturn]] void invalid_chain(X86 *c, uint32_t reg, uint32_t target, const char *why) {
-    LOGW("SEH: %s (registration=%08x target=%08x FS=%08x ESP=%08x)", why, reg, target, c->fs_base,
-         c->r[R_ESP]);
+    LOGW("SEH: %s (registration=%08x target=%08x FS=%08x ESP=%08x EBX=%08x)", why, reg, target,
+         c->fs_base, c->r[R_ESP], c->r[R_EBX]);
+    if (c->fs_base && gm_valid(c->fs_base, 12))
+        LOGW("SEH TEB: head=%08x hi=%08x lo=%08x", rd32(c->fs_base), rd32(c->fs_base + 4),
+             rd32(c->fs_base + 8));
+    if (c->r[R_EBX] && gm_valid(c->r[R_EBX], 40)) {
+        uint32_t b = c->r[R_EBX];
+        LOGW("SEH EBX[0..9]: %08x %08x %08x %08x %08x %08x %08x %08x %08x %08x",
+             rd32(b), rd32(b+4), rd32(b+8), rd32(b+12), rd32(b+16),
+             rd32(b+20), rd32(b+24), rd32(b+28), rd32(b+32), rd32(b+36));
+    }
+#if !defined(__wasm__) && !defined(_WIN32)
+    void *bt[32];
+    int n = backtrace(bt, 32);
+    char **syms = backtrace_symbols(bt, n);
+    if (syms) {
+        for (int i = 0; i < n; ++i)
+            LOGW("SEH bt[%d]: %s", i, syms[i]);
+        free(syms);
+    }
+#endif
     fatal_abort();
 }
 
