@@ -1029,11 +1029,64 @@ void k_WaitForMultipleObjectsEx(X86 *c) {
     wait_multiple_objects(c);
 }
 
+void k_lstrcmpW(X86 *c) {
+    std::string a = gm_wstr(arg(c, 0)), b = gm_wstr(arg(c, 1));
+    int r = strcmp(a.c_str(), b.c_str());
+    set_eax(c, r < 0 ? 0xffffffffu : (r > 0 ? 1u : 0u));
+}
+
 bool resource_module(uint32_t module) {
     if (!module || module == loader_image_base())
         return true;
     set_last_error(1812);
     return false;
+}
+static uint32_t ansi_res_to_wide(uint32_t id_or_str, uint32_t *tmp_out) {
+    *tmp_out = 0;
+    if (id_or_str < 0x10000u) return id_or_str;
+    std::string s = gm_str(id_or_str);
+    uint32_t cap = (uint32_t)s.size() + 1;
+    uint32_t buf = heap_alloc(cap * 2, true);
+    if (!buf) return 0;
+    gm_put_wstr(buf, s, cap);
+    *tmp_out = buf;
+    return buf;
+}
+void k_FindResourceA(X86 *c) {
+    if (!resource_module(arg(c, 0))) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t t1 = 0, t2 = 0;
+    uint32_t wtype = ansi_res_to_wide(arg(c, 2), &t1);
+    uint32_t wname = ansi_res_to_wide(arg(c, 1), &t2);
+    std::string why;
+    uint32_t entry = resource_find(wtype, wname, &why);
+    if (t1) heap_free(t1);
+    if (t2) heap_free(t2);
+    if (!entry) {
+        set_last_error(1814);
+        LOGV("FindResourceA: %s", why.c_str());
+    }
+    set_eax(c, entry);
+}
+void k_FindResourceExA(X86 *c) {
+    if (!resource_module(arg(c, 0))) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t t1 = 0, t2 = 0;
+    uint32_t wtype = ansi_res_to_wide(arg(c, 1), &t1);
+    uint32_t wname = ansi_res_to_wide(arg(c, 2), &t2);
+    std::string why;
+    uint32_t entry = resource_find(wtype, wname, &why);
+    if (t1) heap_free(t1);
+    if (t2) heap_free(t2);
+    if (!entry) {
+        set_last_error(1814);
+        LOGV("FindResourceExA: %s", why.c_str());
+    }
+    set_eax(c, entry);
 }
 void k_FindResourceW(X86 *c) {
     if (!resource_module(arg(c, 0))) {
@@ -1102,6 +1155,8 @@ static const ImportShim g_kernel32_wide[] = {
     {"KERNEL32.dll", "GetTempPathA", 2, k_GetTempPathA},
     {"KERNEL32.dll", "GetTempPathW", 2, k_GetTempPathW},
     {"SHELL32.dll", "CommandLineToArgvW", 2, command_line_to_argv},
+    {"KERNEL32.dll", "FindResourceA", 3, k_FindResourceA},
+    {"KERNEL32.dll", "FindResourceExA", 4, k_FindResourceExA},
     {"KERNEL32.dll", "FindResourceW", 3, k_FindResourceW},
     {"KERNEL32.dll", "LoadResource", 2, k_LoadResource},
     {"KERNEL32.dll", "LockResource", 1, k_LockResource},
@@ -1144,6 +1199,7 @@ static const ImportShim g_kernel32_wide[] = {
     {"KERNEL32.dll", "GetConsoleOutputCP", 0, k_GetConsoleOutputCP},
 
     {"KERNEL32.dll", "lstrlenW", 1, k_lstrlenW},
+    {"KERNEL32.dll", "lstrcmpW", 2, k_lstrcmpW},
     {"KERNEL32.dll", "lstrcatW", 2, k_lstrcatW},
     {"KERNEL32.dll", "FormatMessageW", 7, k_FormatMessageW},
     {"KERNEL32.dll", "OutputDebugStringW", 1, k_OutputDebugStringW},

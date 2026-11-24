@@ -6,6 +6,7 @@
 // them out through PeekMessageA/GetMessageA exactly as it would on Win32.
 #include "user32_internal.h"
 #include "gdi_image.h"
+#include "resources.h"
 #include "win32.h"
 #include "../platform/os.h"
 #include "memory.h"
@@ -88,13 +89,13 @@ Window *find_window(uint32_t hwnd) {
 // Windows tells a window where it is and how big it is as soon as it exists,
 // and again whenever that changes; a game sizes its blit rectangle from those
 // two messages and never asks again. No non-client area is modelled here.
-static void post_geometry(uint32_t hwnd, const Window *w, bool moved, bool sized) {
-    if (moved)
-        host_post_message(hwnd, 0x0003 /* WM_MOVE */, 0,
-                          ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
+static void send_geometry(X86 *c, uint32_t hwnd, const Window *w, bool moved, bool sized) {
     if (sized)
-        host_post_message(hwnd, 0x0005 /* WM_SIZE */, 0 /* SIZE_RESTORED */,
-                          ((uint32_t)(uint16_t)w->h << 16) | (uint16_t)w->w);
+        host_dispatch_to_wndproc(c, hwnd, 0x0005 /* WM_SIZE */, 0 /* SIZE_RESTORED */,
+                                 ((uint32_t)(uint16_t)w->h << 16) | (uint16_t)w->w);
+    if (moved)
+        host_dispatch_to_wndproc(c, hwnd, 0x0003 /* WM_MOVE */, 0,
+                                 ((uint32_t)(uint16_t)w->y << 16) | (uint16_t)w->x);
 }
 
 void store_msg(uint32_t p, const Msg &m) {
@@ -284,6 +285,36 @@ void u_UnregisterClassA(X86 *c) {
     set_eax(c, 1);
 }
 
+// Track WH_CBT hooks (idHook == 5) so MFC's _AfxCbtFilterHook can subclass
+// newly created windows and dialogs via HCBT_CREATEWND (3).
+struct HookEntry {
+    uint32_t handle;
+    int32_t id_hook;
+    uint32_t proc;
+    uint32_t tid;
+};
+std::vector<HookEntry> &hooks() {
+    static std::vector<HookEntry> v;
+    return v;
+}
+void fire_cbt_createwnd(X86 *c, uint32_t hwnd, uint32_t cs) {
+    uint32_t tid = guest_current_thread_id();
+    // Copy list in case the hook unhooks itself inside the callback (MFC does!).
+    auto snap = hooks();
+    uint32_t cbt = heap_alloc(8, true);
+    if (cbt) {
+        wr32(cbt + 0, cs);
+        wr32(cbt + 4, 0); // hwndInsertAfter
+    }
+    for (auto it = snap.rbegin(); it != snap.rend(); ++it) {
+        if (it->id_hook == 5 && (it->tid == 0 || it->tid == tid) && it->proc) {
+            guest_call(c, it->proc, 3u /* HCBT_CREATEWND */, hwnd, cbt);
+        }
+    }
+    if (cbt)
+        heap_free(cbt);
+}
+
 // Create a guest window and deliver WM_NCCREATE/WM_CREATE through its window procedure.
 // Honor callback rejection and the initial visibility transition before returning the window handle.
 namespace {
@@ -358,6 +389,8 @@ void create_window_body(X86 *c, bool wide) {
         wr32(cs + 40, arg(c, 1)); // lpszClass
         wr32(cs + 44, exstyle);
     }
+    // Fire WH_CBT HCBT_CREATEWND before WM_NCCREATE so MFC can subclass the window.
+    fire_cbt_createwnd(c, hwnd, cs);
     // Windows sends WM_NCCREATE first; FALSE from it cancels creation, and
     // -1 from WM_CREATE does the same.
     // A procedure that does not handle WM_NCCREATE passes it to DefWindowProc,
@@ -383,10 +416,10 @@ void create_window_body(X86 *c, bool wide) {
     // it invalidates the window and tells the host, and a host does not have
     // to know that CreateWindowExA can be a show as well.
     if (Window *nw = find_window(hwnd)) {
-        post_geometry(hwnd, nw, true, true);
+        send_geometry(c, hwnd, nw, true, true);
+        nw->shown = true;
         if ((nw->style & WS_VISIBLE) && !nw->visible) {
             nw->visible = true;
-            nw->shown = true;
             nw->update_pending = true;
             if (g_window_shown)
                 g_window_shown(hwnd);
@@ -420,10 +453,7 @@ static void became_visible(Window *w, bool to_top) {
     if (to_top)
         reorder_window(w->hwnd, 0);
     w->update_pending = true;
-    if (!w->shown) {
-        w->shown = true;
-        post_geometry(w->hwnd, w, false, true);
-    }
+    w->shown = true;
     if (g_window_shown)
         g_window_shown(w->hwnd);
 }
@@ -455,6 +485,9 @@ void u_ShowWindow(X86 *c) {
     } else if (cmd == 1 || cmd == 9)
         w->style &= ~0x21000000u;
     set_eax(c, was ? 1 : 0);
+    LOGV("ShowWindow(%08x, %u) was=%d", arg(c, 0), cmd, was ? 1 : 0);
+    if (was != w->visible)
+        host_dispatch_to_wndproc(c, w->hwnd, 0x0018 /* WM_SHOWWINDOW */, w->visible ? 1 : 0, 0);
     if (!was && w->visible)
         became_visible(w, cmd != 4 && cmd != 7 && cmd != 8); // SW_*NOACTIVATE keeps stacking
 }
@@ -546,6 +579,12 @@ void u_GetWindowRect(X86 *c) {
     Window *w = find_window(arg(c, 0));
     uint32_t r = arg(c, 1);
     if (!w || !r) {
+        if (r && gm_valid(r, 16)) {
+            wr32(r, 0);
+            wr32(r + 4, 0);
+            wr32(r + 8, 0);
+            wr32(r + 12, 0);
+        }
         set_eax(c, 0);
         return;
     }
@@ -718,6 +757,8 @@ void u_SetWindowLongA(X86 *c) {
     case -16:
         old = w->style;
         w->style = v;
+        w->visible = (v & WS_VISIBLE) != 0;
+        w->enabled = !(v & 0x08000000u);
         break;
     case -20:
         old = w->exstyle;
@@ -776,14 +817,40 @@ void u_GetWindowLongA(X86 *c) {
     }
 }
 
+static uint32_t find_dlg_item(uint32_t parent, uint32_t id) {
+    for (const auto &kv : windows())
+        if (kv.second.parent == parent && kv.second.id == id)
+            return kv.first;
+    return 0;
+}
+
 void u_SetWindowTextA(X86 *c) {
-    Window *w = find_window(arg(c, 0));
-    if (w)
-        w->title_utf8 = gm_str(arg(c, 1));
+    uint32_t hwnd = arg(c, 0), text = arg(c, 1);
+    Window *w = find_window(hwnd);
+    if (!w) {
+        set_eax(c, 0);
+        return;
+    }
+    if (w->wndproc) {
+        set_eax(c, host_dispatch_to_wndproc(c, hwnd, 0x000c /* WM_SETTEXT */, 0, text));
+        return;
+    }
+    w->title_utf8 = gm_str(text);
     set_eax(c, 1);
 }
 
 void u_SetDlgItemTextA(X86 *c) {
+    uint32_t child = find_dlg_item(arg(c, 0), arg(c, 1));
+    Window *w = find_window(child);
+    if (!w) {
+        set_eax(c, 0);
+        return;
+    }
+    if (w->wndproc) {
+        set_eax(c, host_dispatch_to_wndproc(c, child, 0x000c /* WM_SETTEXT */, 0, arg(c, 2)));
+        return;
+    }
+    w->title_utf8 = gm_str(arg(c, 2));
     set_eax(c, 1);
 }
 
@@ -1096,11 +1163,145 @@ void def_window_proc(X86 *c, bool wide) {
             w->title_utf8 = wide ? gm_wstr(arg(c, 3)) : gm_str(arg(c, 3));
         set_eax(c, w ? 1 : 0);
         return;
-    case 0x000d: // WM_GETTEXT
-        set_eax(c, put_text(arg(c, 3), arg(c, 2), w ? w->title_utf8 : "", wide));
+    case 0x000d: { // WM_GETTEXT
+        std::string txt = w ? w->title_utf8 : "";
+        if (w && txt.empty() && w->cur_sel >= 0 && (size_t)w->cur_sel < w->items.size())
+            txt = w->items[(size_t)w->cur_sel].text;
+        set_eax(c, put_text(arg(c, 3), arg(c, 2), txt, wide));
         return;
-    case 0x000e: // WM_GETTEXTLENGTH
-        set_eax(c, w ? (wide ? wide_units(w->title_utf8) : uint32_t(w->title_utf8.size())) : 0);
+    }
+    case 0x000e: { // WM_GETTEXTLENGTH
+        std::string txt = w ? w->title_utf8 : "";
+        if (w && txt.empty() && w->cur_sel >= 0 && (size_t)w->cur_sel < w->items.size())
+            txt = w->items[(size_t)w->cur_sel].text;
+        set_eax(c, w ? (wide ? wide_units(txt) : uint32_t(txt.size())) : 0);
+        return;
+    }
+    case 0x00f0: // BM_GETCHECK
+        set_eax(c, w ? w->btn_check : 0);
+        return;
+    case 0x00f1: // BM_SETCHECK
+        if (w)
+            w->btn_check = arg(c, 2);
+        set_eax(c, 0);
+        return;
+    case 0x00f2: // BM_GETSTATE
+        set_eax(c, w ? (w->btn_state | (w->btn_check & 3u)) : 0);
+        return;
+    case 0x00f3: // BM_SETSTATE
+        if (w) {
+            if (arg(c, 2))
+                w->btn_state |= 4u;
+            else
+                w->btn_state &= ~4u;
+        }
+        set_eax(c, 0);
+        return;
+    case 0x00f4: // BM_SETSTYLE
+        if (w)
+            w->style = (w->style & ~0xffffu) | (arg(c, 2) & 0xffffu);
+        set_eax(c, 0);
+        return;
+    case 0x0143: // CB_ADDSTRING
+    case 0x0180: // LB_ADDSTRING
+        if (w) {
+            std::string s = wide ? gm_wstr(arg(c, 3)) : gm_str(arg(c, 3));
+            uint32_t idx = (uint32_t)w->items.size();
+            w->items.push_back({s, 0});
+            set_eax(c, idx);
+        } else {
+            set_eax(c, 0xffffffffu);
+        }
+        return;
+    case 0x014a: // CB_INSERTSTRING
+    case 0x0181: // LB_INSERTSTRING
+        if (w) {
+            int32_t idx = (int32_t)arg(c, 2);
+            std::string s = wide ? gm_wstr(arg(c, 3)) : gm_str(arg(c, 3));
+            if (idx < 0 || (size_t)idx >= w->items.size()) {
+                idx = (int32_t)w->items.size();
+                w->items.push_back({s, 0});
+            } else {
+                w->items.insert(w->items.begin() + idx, {s, 0});
+                if (w->cur_sel >= idx) ++w->cur_sel;
+            }
+            set_eax(c, (uint32_t)idx);
+        } else {
+            set_eax(c, 0xffffffffu);
+        }
+        return;
+    case 0x0144: // CB_DELETESTRING
+    case 0x0182: // LB_DELETESTRING
+        if (w && arg(c, 2) < w->items.size()) {
+            w->items.erase(w->items.begin() + arg(c, 2));
+            if (w->cur_sel == (int32_t)arg(c, 2)) w->cur_sel = -1;
+            else if (w->cur_sel > (int32_t)arg(c, 2)) --w->cur_sel;
+            set_eax(c, (uint32_t)w->items.size());
+        } else {
+            set_eax(c, 0xffffffffu);
+        }
+        return;
+    case 0x014b: // CB_RESETCONTENT
+    case 0x0184: // LB_RESETCONTENT
+        if (w) {
+            w->items.clear();
+            w->cur_sel = -1;
+        }
+        set_eax(c, 0);
+        return;
+    case 0x0146: // CB_GETCOUNT
+    case 0x018b: // LB_GETCOUNT
+        set_eax(c, w ? (uint32_t)w->items.size() : 0xffffffffu);
+        return;
+    case 0x0147: // CB_GETCURSEL
+    case 0x0188: // LB_GETCURSEL
+        set_eax(c, w ? (uint32_t)w->cur_sel : 0xffffffffu);
+        return;
+    case 0x014e: // CB_SETCURSEL
+    case 0x0186: // LB_SETCURSEL
+        if (w) {
+            int32_t sel = (int32_t)arg(c, 2);
+            if (sel < 0 || (size_t)sel >= w->items.size()) {
+                w->cur_sel = -1;
+                set_eax(c, sel < 0 ? 0 : 0xffffffffu);
+            } else {
+                w->cur_sel = sel;
+                w->title_utf8 = w->items[(size_t)sel].text;
+                set_eax(c, (uint32_t)sel);
+            }
+        } else {
+            set_eax(c, 0xffffffffu);
+        }
+        return;
+    case 0x0148: // CB_GETLBTEXT
+    case 0x0189: // LB_GETTEXT
+        if (w && arg(c, 2) < w->items.size()) {
+            set_eax(c, put_text(arg(c, 3), 4096, w->items[arg(c, 2)].text, wide));
+        } else {
+            set_eax(c, 0xffffffffu);
+        }
+        return;
+    case 0x0149: // CB_GETLBTEXTLEN
+    case 0x018a: // LB_GETTEXTLEN
+        if (w && arg(c, 2) < w->items.size()) {
+            const auto &s = w->items[arg(c, 2)].text;
+            set_eax(c, wide ? wide_units(s) : (uint32_t)s.size());
+        } else {
+            set_eax(c, 0xffffffffu);
+        }
+        return;
+    case 0x0150: // CB_GETITEMDATA
+    case 0x0199: // LB_GETITEMDATA
+        set_eax(c, (w && arg(c, 2) < w->items.size()) ? w->items[arg(c, 2)].data : 0xffffffffu);
+        return;
+    case 0x0151: // CB_SETITEMDATA
+    case 0x019a: // LB_SETITEMDATA
+        if (w && arg(c, 2) < w->items.size()) {
+            w->items[arg(c, 2)].data = arg(c, 3);
+            set_eax(c, 0);
+        } else {
+            set_eax(c, 0xffffffffu);
+        }
         return;
     case 0x000f: // DefWindowProc validates an otherwise unhandled paint.
         if (w)
@@ -1531,10 +1732,8 @@ void u_MessageBoxW(X86 *c) {
 
 // wvsprintfA: the Win32 subset (%s %c %d %i %u %x %X %% with width/precision
 // and the l/h size prefixes). `va` points at the guest argument array.
-void u_wvsprintfA(X86 *c) {
-    uint32_t out = arg(c, 0);
-    std::string fmt = gm_str(arg(c, 1), 4096);
-    uint32_t va = arg(c, 2);
+static void u_wvsprintfA_va(X86 *c, uint32_t out, uint32_t fmt_ptr, uint32_t va) {
+    std::string fmt = gm_str(fmt_ptr, 4096);
     std::string res;
     size_t i = 0;
     while (i < fmt.size()) {
@@ -1803,6 +2002,491 @@ void u_MapVirtualKeyA(X86 *c) {
     set_eax(c, map_virtual_key(arg(c, 0), arg(c, 1)));
 }
 
+void u_RegisterWindowMessageA(X86 *c) {
+    static std::map<std::string, uint32_t> msgs;
+    static uint32_t next_msg = 0xC000;
+    std::string s = gm_str(arg(c, 0));
+    auto it = msgs.find(s);
+    if (it != msgs.end()) { set_eax(c, it->second); return; }
+    uint32_t id = next_msg++;
+    msgs[s] = id;
+    set_eax(c, id);
+}
+void u_RegisterClipboardFormatA(X86 *c) {
+    static std::map<std::string, uint32_t> fmts;
+    static uint32_t next_fmt = 0xC400;
+    std::string s = gm_str(arg(c, 0));
+    auto it = fmts.find(s);
+    if (it != fmts.end()) { set_eax(c, it->second); return; }
+    uint32_t id = next_fmt++;
+    fmts[s] = id;
+    set_eax(c, id);
+}
+void u_SetWindowsHookExA(X86 *c) {
+    static uint32_t next_hook = 0x484F0001u;
+    uint32_t h = next_hook++;
+    hooks().push_back(HookEntry{h, (int32_t)arg(c, 0), arg(c, 1), arg(c, 3)});
+    set_eax(c, h);
+}
+void u_UnhookWindowsHookEx(X86 *c) {
+    uint32_t h = arg(c, 0);
+    auto &v = hooks();
+    for (auto it = v.begin(); it != v.end(); ++it) {
+        if (it->handle == h) {
+            v.erase(it);
+            set_eax(c, 1);
+            return;
+        }
+    }
+    set_eax(c, 0);
+}
+void u_CallNextHookEx(X86 *c) { set_eax(c, 0); }
+
+static std::map<std::pair<uint32_t, std::string>, uint32_t> &win_props() {
+    static auto *m = new std::map<std::pair<uint32_t, std::string>, uint32_t>();
+    return *m;
+}
+static std::string prop_key(uint32_t p) {
+    if (p < 0x10000) return "#" + std::to_string(p);
+    return gm_str(p);
+}
+void u_SetPropA(X86 *c) {
+    win_props()[{arg(c, 0), prop_key(arg(c, 1))}] = arg(c, 2);
+    set_eax(c, 1);
+}
+void u_GetPropA(X86 *c) {
+    auto &m = win_props();
+    auto it = m.find({arg(c, 0), prop_key(arg(c, 1))});
+    set_eax(c, it != m.end() ? it->second : 0);
+}
+void u_RemovePropA(X86 *c) {
+    auto &m = win_props();
+    auto it = m.find({arg(c, 0), prop_key(arg(c, 1))});
+    uint32_t v = 0;
+    if (it != m.end()) { v = it->second; m.erase(it); }
+    set_eax(c, v);
+}
+void u_CharUpperA(X86 *c) {
+    uint32_t p = arg(c, 0);
+    if (p < 0x10000u) {
+        set_eax(c, (uint32_t)std::toupper((unsigned char)(p & 0xff)));
+        return;
+    }
+    for (uint32_t i = 0; i < 0x8000; i++) {
+        uint8_t ch = rd8(p + i);
+        if (!ch) break;
+        wr8(p + i, (uint8_t)std::toupper(ch));
+    }
+    set_eax(c, p);
+}
+void u_CharLowerA(X86 *c) {
+    uint32_t p = arg(c, 0);
+    if (p < 0x10000u) {
+        set_eax(c, (uint32_t)std::tolower((unsigned char)(p & 0xff)));
+        return;
+    }
+    for (uint32_t i = 0; i < 0x8000; i++) {
+        uint8_t ch = rd8(p + i);
+        if (!ch) break;
+        wr8(p + i, (uint8_t)std::tolower(ch));
+    }
+    set_eax(c, p);
+}
+void u_wvsprintfA(X86 *c) { u_wvsprintfA_va(c, arg(c, 0), arg(c, 1), arg(c, 2)); }
+void u_wsprintfA(X86 *c) { u_wvsprintfA_va(c, arg(c, 0), arg(c, 1), c->r[4] + 12); }
+void u_GetClassInfoA(X86 *c) { set_eax(c, 0); }
+void u_GetClassInfoExA(X86 *c) { set_eax(c, 0); }
+void u_LockWindowUpdate(X86 *c) { set_eax(c, 1); }
+void u_ChangeDisplaySettingsA(X86 *c) { set_eax(c, 0); } // DISP_CHANGE_SUCCESSFUL
+void u_DrawTextA(X86 *c) { set_eax(c, 16); }
+void u_GetWindowTextLengthA(X86 *c) {
+    uint32_t hwnd = arg(c, 0);
+    Window *w = find_window(hwnd);
+    if (!w) {
+        set_eax(c, 0);
+        return;
+    }
+    if (w->wndproc) {
+        set_eax(c, host_dispatch_to_wndproc(c, hwnd, 0x000e /* WM_GETTEXTLENGTH */, 0, 0));
+        return;
+    }
+    set_eax(c, (uint32_t)w->title_utf8.size());
+}
+void u_GetClassNameA(X86 *c) {
+    uint32_t buf = arg(c, 1), cap = arg(c, 2);
+    set_eax(c, (buf && cap) ? gm_put_str(buf, "WormsArmageddon", cap) : 0);
+}
+void u_GetClassLongA(X86 *c) { set_eax(c, 0); }
+void u_ModifyMenuA(X86 *c) { set_eax(c, 1); }
+void u_LoadBitmapA(X86 *c) {
+    uint32_t bytes = 0, p = resource_data(resource_find(2, arg(c, 1)), &bytes);
+    GdiImage image;
+    set_eax(c, p && gdi_decode_image(p, bytes, &image) ? gdi_image_bitmap(image) : 0);
+}
+void u_SendDlgItemMessageA(X86 *c) {
+    uint32_t child = find_dlg_item(arg(c, 0), arg(c, 1));
+    Window *w = find_window(child);
+    if (!w) {
+        set_eax(c, 0);
+        return;
+    }
+    set_eax(c, host_dispatch_to_wndproc(c, child, arg(c, 2), arg(c, 3), arg(c, 4)));
+}
+void u_IsDlgButtonChecked(X86 *c) { set_eax(c, 0); }
+void u_SetKeyboardState(X86 *c) { set_eax(c, 1); }
+void u_VkKeyScanA(X86 *c) { set_eax(c, arg(c, 0) & 0xffu); }
+void u_OpenInputDesktop(X86 *c) { set_eax(c, 0x4445534bu); }
+void u_CloseDesktop(X86 *c) { set_eax(c, 1); }
+void u_WinHelpA(X86 *c) { set_eax(c, 1); }
+void u_MoveWindow(X86 *c) {
+    if (Window *w = find_window(arg(c, 0)))
+        set_window_pos(c, w, 0, int32_t(arg(c, 1)), int32_t(arg(c, 2)), int32_t(arg(c, 3)),
+                       int32_t(arg(c, 4)), 0x0004 /* SWP_NOZORDER */);
+    set_eax(c, 1);
+}
+void u_LoadImageA(X86 *c) {
+    uint32_t name = arg(c, 1), type = arg(c, 2), flags = arg(c, 5);
+    if (type == 0) { // IMAGE_BITMAP
+        uint32_t temp = 0, data = 0, bytes = 0, pixel_offset = 0;
+        if (flags & 0x10) { // LR_LOADFROMFILE
+            std::string path = win32_host_path(gm_str(name, 260));
+            FILE *f = path.empty() ? nullptr : fopen(path.c_str(), "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long n = ftell(f);
+                rewind(f);
+                if (n >= 54 && uint64_t(n) < GUEST_SIZE) {
+                    temp = heap_alloc(uint32_t(n));
+                    if (temp && fread(g_mem + temp, 1, size_t(n), f) == size_t(n) &&
+                        rd16(temp) == 0x4d42 && rd32(temp + 10) >= 54 &&
+                        rd32(temp + 10) <= uint32_t(n)) {
+                        pixel_offset = rd32(temp + 10) - 14;
+                        data = temp + 14;
+                        bytes = uint32_t(n) - 14;
+                    }
+                }
+                fclose(f);
+            }
+        } else {
+            uint32_t entry = resource_find(2, name);
+            if (entry)
+                data = resource_data(entry, &bytes);
+        }
+        uint32_t hbmp = 0;
+        if (data) {
+            if (flags & 0x2000) { // LR_CREATEDIBSECTION
+                hbmp = gdi_create_dib_from_packed(data, bytes, pixel_offset);
+            } else {
+                GdiImage image;
+                if (gdi_decode_image(data, bytes, &image, pixel_offset))
+                    hbmp = gdi_image_bitmap(image);
+            }
+        }
+        if (temp)
+            heap_free(temp);
+        set_eax(c, hbmp);
+        return;
+    }
+    if (type == 1) { // IMAGE_ICON
+        u_LoadIconA(c);
+        return;
+    }
+    if (type == 2) { // IMAGE_CURSOR
+        u_LoadCursorA(c);
+        return;
+    }
+    set_eax(c, 0);
+}
+void u_GetWindowTextA(X86 *c) {
+    uint32_t hwnd = arg(c, 0), buf = arg(c, 1), cap = arg(c, 2);
+    Window *w = find_window(hwnd);
+    if (!w || !buf || !cap) {
+        set_eax(c, 0);
+        return;
+    }
+    if (w->wndproc) {
+        set_eax(c, host_dispatch_to_wndproc(c, hwnd, 0x000d /* WM_GETTEXT */, cap, buf));
+        return;
+    }
+    set_eax(c, gm_put_str(buf, w->title_utf8.c_str(), cap));
+}
+void u_PtInRect(X86 *c) {
+    uint32_t r = arg(c, 0);
+    int32_t x = (int32_t)arg(c, 1), y = (int32_t)arg(c, 2);
+    if (!r || !gm_valid(r, 16)) { set_eax(c, 0); return; }
+    int32_t l = (int32_t)rd32(r), t = (int32_t)rd32(r + 4), ri = (int32_t)rd32(r + 8), b = (int32_t)rd32(r + 12);
+    set_eax(c, (x >= l && x < ri && y >= t && y < b) ? 1 : 0);
+}
+void u_CopyRect(X86 *c) {
+    uint32_t d = arg(c, 0), s = arg(c, 1);
+    if (!d || !s || !gm_valid(d, 16) || !gm_valid(s, 16)) { set_eax(c, 0); return; }
+    memcpy(g_mem + d, g_mem + s, 16);
+    set_eax(c, 1);
+}
+void u_OffsetRect(X86 *c) {
+    uint32_t r = arg(c, 0);
+    int32_t dx = (int32_t)arg(c, 1), dy = (int32_t)arg(c, 2);
+    if (!r || !gm_valid(r, 16)) { set_eax(c, 0); return; }
+    wr32(r, (int32_t)rd32(r) + dx);
+    wr32(r + 4, (int32_t)rd32(r + 4) + dy);
+    wr32(r + 8, (int32_t)rd32(r + 8) + dx);
+    wr32(r + 12, (int32_t)rd32(r + 12) + dy);
+    set_eax(c, 1);
+}
+void u_InflateRect(X86 *c) {
+    uint32_t r = arg(c, 0);
+    int32_t dx = (int32_t)arg(c, 1), dy = (int32_t)arg(c, 2);
+    if (!r || !gm_valid(r, 16)) { set_eax(c, 0); return; }
+    wr32(r, (int32_t)rd32(r) - dx);
+    wr32(r + 4, (int32_t)rd32(r + 4) - dy);
+    wr32(r + 8, (int32_t)rd32(r + 8) + dx);
+    wr32(r + 12, (int32_t)rd32(r + 12) + dy);
+    set_eax(c, 1);
+}
+void u_SetRectEmpty(X86 *c) {
+    uint32_t r = arg(c, 0);
+    if (!r || !gm_valid(r, 16)) { set_eax(c, 0); return; }
+    memset(g_mem + r, 0, 16);
+    set_eax(c, 1);
+}
+void u_EqualRect(X86 *c) {
+    uint32_t a = arg(c, 0), b = arg(c, 1);
+    if (!a || !b || !gm_valid(a, 16) || !gm_valid(b, 16)) { set_eax(c, 0); return; }
+    set_eax(c, memcmp(g_mem + a, g_mem + b, 16) == 0 ? 1 : 0);
+}
+void u_SubtractRect(X86 *c) {
+    uint32_t d = arg(c, 0), s1 = arg(c, 1);
+    if (!d || !s1 || !gm_valid(d, 16) || !gm_valid(s1, 16)) { set_eax(c, 0); return; }
+    memcpy(g_mem + d, g_mem + s1, 16);
+    set_eax(c, 1);
+}
+void u_ret0(X86 *c) { set_eax(c, 0); }
+void u_ret1(X86 *c) { set_eax(c, 1); }
+void u_GetMenuCheckMarkDimensions(X86 *c) { set_eax(c, (13u << 16) | 13u); }
+void u_GetDlgItemTextA(X86 *c) {
+    uint32_t child = find_dlg_item(arg(c, 0), arg(c, 1));
+    uint32_t buf = arg(c, 2), cap = arg(c, 3);
+    Window *w = find_window(child);
+    if (!w || !buf || !cap) {
+        if (buf && cap && gm_valid(buf, 1)) wr8(buf, 0);
+        set_eax(c, 0);
+        return;
+    }
+    if (w->wndproc) {
+        set_eax(c, host_dispatch_to_wndproc(c, child, 0x000d /* WM_GETTEXT */, cap, buf));
+        return;
+    }
+    set_eax(c, gm_put_str(buf, w->title_utf8.c_str(), cap));
+}
+void u_GetDlgItemInt(X86 *c) {
+    if (arg(c, 2) && gm_valid(arg(c, 2), 4)) wr32(arg(c, 2), 0);
+    set_eax(c, 0);
+}
+void u_GetDlgItem(X86 *c) {
+    uint32_t parent = arg(c, 0), id = arg(c, 1);
+    for (const auto &kv : windows()) {
+        if (kv.second.parent == parent && kv.second.id == id) {
+            set_eax(c, kv.first);
+            return;
+        }
+    }
+    set_eax(c, 0);
+}
+static uint32_t dlg_skip_sz_or_ord(uint32_t p, std::string *out = nullptr) {
+    if (!gm_valid(p, 2)) return p;
+    uint16_t first = rd16(p);
+    if (first == 0) return p + 2;
+    if (first == 0xffff) {
+        if (out) *out = "#" + std::to_string(rd16(p + 2));
+        return p + 4;
+    }
+    std::string s;
+    while (gm_valid(p, 2)) {
+        uint16_t ch = rd16(p);
+        p += 2;
+        if (!ch) break;
+        if (ch < 128) s.push_back((char)ch);
+    }
+    if (out) *out = s;
+    return p;
+}
+void u_CreateDialogIndirectParamA(X86 *c) {
+    uint32_t hinst = arg(c, 0), tpl = arg(c, 1), parent = arg(c, 2), dlgproc = arg(c, 3), lparam = arg(c, 4);
+    if (!tpl || !gm_valid(tpl, 18)) {
+        set_eax(c, 0);
+        return;
+    }
+    bool is_ex = (rd16(tpl) == 1 && rd16(tpl + 2) == 0xffff);
+    uint32_t exstyle = 0, style = 0;
+    uint16_t cdit = 0;
+    int16_t x = 0, y = 0, cx = 320, cy = 240;
+    uint32_t p = tpl;
+    if (is_ex) {
+        exstyle = rd32(p + 8);
+        style = rd32(p + 12);
+        cdit = rd16(p + 16);
+        x = (int16_t)rd16(p + 18);
+        y = (int16_t)rd16(p + 20);
+        cx = (int16_t)rd16(p + 22);
+        cy = (int16_t)rd16(p + 24);
+        p += 26;
+    } else {
+        style = rd32(p + 0);
+        exstyle = rd32(p + 4);
+        cdit = rd16(p + 8);
+        x = (int16_t)rd16(p + 10);
+        y = (int16_t)rd16(p + 12);
+        cx = (int16_t)rd16(p + 14);
+        cy = (int16_t)rd16(p + 16);
+        p += 18;
+    }
+    std::string title;
+    p = dlg_skip_sz_or_ord(p); // menu
+    p = dlg_skip_sz_or_ord(p); // class
+    p = dlg_skip_sz_or_ord(p, &title); // title
+    if (style & 0x40u) { // DS_SETFONT
+        p += is_ex ? 6 : 2;
+        p = dlg_skip_sz_or_ord(p); // typeface
+    }
+    int32_t px = (x * 6) / 4, py = (y * 13) / 8;
+    int32_t pw = cx > 0 ? (cx * 6) / 4 : 640, ph = cy > 0 ? (cy * 13) / 8 : 480;
+
+    uint32_t hwnd = g_next_hwnd;
+    g_next_hwnd += 4;
+    Window win;
+    win.hwnd = hwnd;
+    win.wndproc = dlgproc;
+    win.style = style;
+    win.exstyle = exstyle;
+    win.x = px;
+    win.y = py;
+    win.w = pw;
+    win.h = ph;
+    win.cls = "#32770";
+    win.title_utf8 = title;
+    win.parent = (style & 0x40000000u) ? parent : 0;
+    win.owner = win.parent ? 0 : parent;
+    win.enabled = !(style & 0x08000000u);
+    win.thread = guest_current_thread_id();
+    win.hinstance = hinst;
+    win.extra.assign(8, 0);
+    windows()[hwnd] = win;
+    if (!g_main_hwnd)
+        g_main_hwnd = hwnd;
+
+    uint32_t cs = heap_alloc(48, true);
+    if (cs) {
+        wr32(cs + 0, lparam);
+        wr32(cs + 4, hinst);
+        wr32(cs + 12, parent);
+        wr32(cs + 16, (uint32_t)ph);
+        wr32(cs + 20, (uint32_t)pw);
+        wr32(cs + 24, (uint32_t)py);
+        wr32(cs + 28, (uint32_t)px);
+        wr32(cs + 32, style);
+        wr32(cs + 44, exstyle);
+    }
+    sched_atomic_enter(c->r[R_ESP]);
+    fire_cbt_createwnd(c, hwnd, cs);
+    host_dispatch_to_wndproc(c, hwnd, 0x0081 /* WM_NCCREATE */, 0, cs);
+    host_dispatch_to_wndproc(c, hwnd, 0x0001 /* WM_CREATE */, 0, cs);
+    if (cs)
+        heap_free(cs);
+
+    // Create child controls from DLGITEMTEMPLATE / DLGITEMTEMPLATEEX
+    ensure_system_classes();
+    uint32_t first_child = 0;
+    for (uint16_t i = 0; i < cdit; ++i) {
+        p = (p + 3u) & ~3u;
+        if (!gm_valid(p, is_ex ? 24 : 18)) break;
+        uint32_t istyle = 0, iex = 0, iid = 0;
+        int16_t ix = 0, iy = 0, icx = 0, icy = 0;
+        if (is_ex) {
+            iex = rd32(p + 4);
+            istyle = rd32(p + 8);
+            ix = (int16_t)rd16(p + 12);
+            iy = (int16_t)rd16(p + 14);
+            icx = (int16_t)rd16(p + 16);
+            icy = (int16_t)rd16(p + 18);
+            iid = rd32(p + 20);
+            p += 24;
+        } else {
+            istyle = rd32(p + 0);
+            iex = rd32(p + 4);
+            ix = (int16_t)rd16(p + 8);
+            iy = (int16_t)rd16(p + 10);
+            icx = (int16_t)rd16(p + 12);
+            icy = (int16_t)rd16(p + 14);
+            iid = rd16(p + 16);
+            p += 18;
+        }
+        std::string icls, ititle;
+        p = dlg_skip_sz_or_ord(p, &icls);
+        if (icls == "#128") icls = "Button";
+        else if (icls == "#129") icls = "Edit";
+        else if (icls == "#130") icls = "Static";
+        else if (icls == "#131") icls = "ListBox";
+        else if (icls == "#132") icls = "ScrollBar";
+        else if (icls == "#133") icls = "ComboBox";
+        p = dlg_skip_sz_or_ord(p, &ititle);
+        uint16_t extra_cb = gm_valid(p, 2) ? rd16(p) : 0;
+        p += 2 + extra_cb;
+
+        uint32_t chwnd = g_next_hwnd;
+        g_next_hwnd += 4;
+        Window cw;
+        cw.hwnd = chwnd;
+        auto cit = classes().find(lower(icls));
+        cw.wndproc = (cit != classes().end() && cit->second.wndproc)
+                         ? cit->second.wndproc
+                         : imports_resolve("USER32.dll", "DefWindowProcA");
+        cw.style = istyle | 0x40000000u;
+        cw.exstyle = iex;
+        cw.x = (ix * 6) / 4;
+        cw.y = (iy * 13) / 8;
+        cw.w = (icx * 6) / 4;
+        cw.h = (icy * 13) / 8;
+        cw.cls = icls;
+        cw.title_utf8 = ititle;
+        cw.parent = hwnd;
+        cw.id = iid;
+        cw.visible = (istyle & WS_VISIBLE) != 0;
+        cw.enabled = !(istyle & 0x08000000u);
+        cw.thread = guest_current_thread_id();
+        cw.hinstance = hinst;
+        windows()[chwnd] = cw;
+        window_created(chwnd);
+        if (!first_child) first_child = chwnd;
+    }
+
+    host_dispatch_to_wndproc(c, hwnd, 0x0110 /* WM_INITDIALOG */, first_child, lparam);
+    if (Window *nw = find_window(hwnd)) {
+        send_geometry(c, hwnd, nw, true, true);
+        nw->shown = true;
+        if ((nw->style & WS_VISIBLE) && !nw->visible) {
+            nw->visible = true;
+            nw->update_pending = true;
+            if (g_window_shown)
+                g_window_shown(hwnd);
+        }
+    }
+    sched_atomic_leave();
+    window_created(hwnd);
+    LOGV("CreateDialogIndirectParamA(\"%s\", %u items) -> %08x", title.c_str(), cdit, hwnd);
+    set_eax(c, hwnd);
+}
+void u_MapDialogRect(X86 *c) {
+    uint32_t r = arg(c, 1);
+    if (!r || !gm_valid(r, 16)) { set_eax(c, 0); return; }
+    wr32(r + 0, ((int32_t)rd32(r + 0) * 6) / 4);
+    wr32(r + 4, ((int32_t)rd32(r + 4) * 13) / 8);
+    wr32(r + 8, ((int32_t)rd32(r + 8) * 6) / 4);
+    wr32(r + 12, ((int32_t)rd32(r + 12) * 13) / 8);
+    set_eax(c, 1);
+}
+void u_DialogBoxParamA(X86 *c) { set_eax(c, 1); } // IDOK
+void u_EndDialog(X86 *c) { set_eax(c, 1); }
+
 const ImportShim g_user32_shims[] = {
     {"USER32.dll", "RegisterClassA", 1, u_RegisterClassA},
     {"USER32.dll", "UnregisterClassA", 2, u_UnregisterClassA},
@@ -1893,5 +2577,62 @@ const ImportShim g_user32_shims[] = {
     {"USER32.dll", "CloseClipboard", 0, u_CloseClipboard},
     {"USER32.dll", "IsClipboardFormatAvailable", 1, u_IsClipboardFormatAvailable},
     {"USER32.dll", "GetClipboardData", 1, u_GetClipboardData},
+    {"USER32.dll", "RegisterWindowMessageA", 1, u_RegisterWindowMessageA},
+    {"USER32.dll", "RegisterClipboardFormatA", 1, u_RegisterClipboardFormatA},
+    {"USER32.dll", "SetWindowsHookExA", 4, u_SetWindowsHookExA},
+    {"USER32.dll", "UnhookWindowsHookEx", 1, u_UnhookWindowsHookEx},
+    {"USER32.dll", "CallNextHookEx", 4, u_CallNextHookEx},
+    {"USER32.dll", "SetPropA", 3, u_SetPropA},
+    {"USER32.dll", "GetPropA", 2, u_GetPropA},
+    {"USER32.dll", "RemovePropA", 2, u_RemovePropA},
+    {"USER32.dll", "CharUpperA", 1, u_CharUpperA},
+    {"USER32.dll", "CharLowerA", 1, u_CharLowerA},
+    {"USER32.dll", "wsprintfA", 0, u_wsprintfA},
+    {"USER32.dll", "GetClassInfoA", 3, u_GetClassInfoA},
+    {"USER32.dll", "GetClassInfoExA", 3, u_GetClassInfoExA},
+    {"USER32.dll", "LockWindowUpdate", 1, u_LockWindowUpdate},
+    {"USER32.dll", "ChangeDisplaySettingsA", 2, u_ChangeDisplaySettingsA},
+    {"USER32.dll", "DrawTextA", 5, u_DrawTextA},
+    {"USER32.dll", "GetWindowTextLengthA", 1, u_GetWindowTextLengthA},
+    {"USER32.dll", "GetClassNameA", 3, u_GetClassNameA},
+    {"USER32.dll", "GetClassLongA", 2, u_GetClassLongA},
+    {"USER32.dll", "ModifyMenuA", 5, u_ModifyMenuA},
+    {"USER32.dll", "LoadBitmapA", 2, u_LoadBitmapA},
+    {"USER32.dll", "SendDlgItemMessageA", 5, u_SendDlgItemMessageA},
+    {"USER32.dll", "IsDlgButtonChecked", 2, u_IsDlgButtonChecked},
+    {"USER32.dll", "SetKeyboardState", 1, u_SetKeyboardState},
+    {"USER32.dll", "VkKeyScanA", 1, u_VkKeyScanA},
+    {"USER32.dll", "OpenInputDesktop", 3, u_OpenInputDesktop},
+    {"USER32.dll", "CloseDesktop", 1, u_CloseDesktop},
+    {"USER32.dll", "WinHelpA", 4, u_WinHelpA},
+    {"USER32.dll", "MoveWindow", 6, u_MoveWindow},
+    {"USER32.dll", "LoadImageA", 6, u_LoadImageA},
+    {"USER32.dll", "GetWindowTextA", 3, u_GetWindowTextA},
+    {"USER32.dll", "PtInRect", 3, u_PtInRect},
+    {"USER32.dll", "CopyRect", 2, u_CopyRect},
+    {"USER32.dll", "OffsetRect", 3, u_OffsetRect},
+    {"USER32.dll", "InflateRect", 3, u_InflateRect},
+    {"USER32.dll", "SetRectEmpty", 1, u_SetRectEmpty},
+    {"USER32.dll", "EqualRect", 2, u_EqualRect},
+    {"USER32.dll", "SubtractRect", 3, u_SubtractRect},
+    {"USER32.dll", "BringWindowToTop", 1, u_ret1},
+    {"USER32.dll", "FlashWindow", 2, u_ret0},
+    {"USER32.dll", "GetQueueStatus", 1, u_ret0},
+    {"USER32.dll", "GetDlgItem", 2, u_GetDlgItem},
+    {"USER32.dll", "GetDlgItemTextA", 4, u_GetDlgItemTextA},
+    {"USER32.dll", "GetDlgItemInt", 4, u_GetDlgItemInt},
+    {"USER32.dll", "DialogBoxParamA", 5, u_DialogBoxParamA},
+    {"USER32.dll", "CreateDialogIndirectParamA", 5, u_CreateDialogIndirectParamA},
+    {"USER32.dll", "EndDialog", 2, u_EndDialog},
+    {"USER32.dll", "FindWindowExA", 4, u_ret0},
+    {"USER32.dll", "ChildWindowFromPointEx", 4, u_ret0},
+    {"USER32.dll", "GetNextDlgTabItem", 3, u_ret0},
+    {"USER32.dll", "MapDialogRect", 2, u_MapDialogRect},
+    {"USER32.dll", "GetMenuCheckMarkDimensions", 0, u_GetMenuCheckMarkDimensions},
+    {"USER32.dll", "SetMenuItemBitmaps", 5, u_ret1},
+    {"USER32.dll", "TabbedTextOutA", 8, u_ret0},
+    {"USER32.dll", "DrawTextExA", 6, u_DrawTextA},
+    {"USER32.dll", "GrayStringA", 9, u_ret1},
+    {"USER32.dll", "mouse_event", 5, u_ret0},
 };
 const size_t g_user32_shim_count = sizeof(g_user32_shims) / sizeof(g_user32_shims[0]);

@@ -112,6 +112,7 @@ async function start() {
     }],
     onRuntimeInitialized() {
       status("");
+      setupFullscreenBanner();
       canvas.focus();
       Module.callMain(source.args);
     },
@@ -155,6 +156,51 @@ if (typeof BroadcastChannel === "function") {
       streamEl.textContent = saved;
     }
   };
+}
+
+function setupFullscreenBanner() {
+  const banner = document.getElementById("fs-banner");
+  const textEl = document.getElementById("fs-text");
+  const toggleBtn = document.getElementById("fs-toggle");
+  const dismissBtn = document.getElementById("fs-dismiss");
+  if (!banner || !toggleBtn || !document.fullscreenEnabled) return;
+  let compact = false;
+  const nativeW = Math.round(window.screen.width * (window.devicePixelRatio || 1));
+  const nativeH = Math.round(window.screen.height * (window.devicePixelRatio || 1));
+  if (textEl && nativeW >= 640 && nativeH >= 480)
+    textEl.textContent = `Tip: Play in Fullscreen for native ${nativeW}×${nativeH} match resolution (Options → Graphics).`;
+  const sync = () => {
+    const isFs = !!document.fullscreenElement;
+    banner.hidden = isFs;
+    banner.classList.toggle("compact", compact && !isFs);
+    toggleBtn.textContent = isFs ? "Exit Fullscreen" : (compact ? "⛶ Fullscreen" : "Enter Fullscreen");
+  };
+  const toggleFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen();
+    } catch {}
+    canvas.focus();
+  };
+  toggleBtn.addEventListener("click", toggleFullscreen);
+  if (dismissBtn) {
+    dismissBtn.addEventListener("click", () => {
+      compact = true;
+      sync();
+      canvas.focus();
+    });
+  }
+  document.addEventListener("fullscreenchange", () => {
+    sync();
+    canvas.focus();
+  });
+  window.addEventListener("keydown", (e) => {
+    if ((e.altKey && e.key === "Enter") || e.key === "F11") {
+      e.preventDefault();
+      toggleFullscreen();
+    }
+  });
+  sync();
 }
 
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());

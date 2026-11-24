@@ -844,6 +844,40 @@ void a_RegSetValueExA(X86 *c) {
 void a_RegSetValueExW(X86 *c) {
     reg_set(c, gm_wstr(arg(c, 1)), true);
 }
+void a_RegSetValueA(X86 *c) {
+    std::string path = key_path(arg(c, 0), gm_str(arg(c, 1), 512));
+    if (path.empty()) {
+        set_eax(c, 6);
+        return;
+    }
+    uint32_t type = arg(c, 2), pdata = arg(c, 3), cb = arg(c, 4);
+    RegValue rv;
+    rv.type = type ? type : 1; // REG_SZ
+    if (pdata && gm_valid(pdata, 1))
+        rv.str = cb ? gm_str(pdata, cb) : gm_str(pdata, 4096);
+    regstore()[path][""] = rv;
+    g_registry_dirty = true;
+    registry_flush();
+    set_eax(c, 0);
+}
+void a_RegQueryValueA(X86 *c) {
+    std::string path = key_path(arg(c, 0), gm_str(arg(c, 1), 512));
+    if (path.empty()) {
+        set_eax(c, 6);
+        return;
+    }
+    auto si = regstore().find(path);
+    if (si == regstore().end()) {
+        set_eax(c, 2);
+        return;
+    }
+    auto vi = si->second.find("");
+    if (vi == si->second.end()) {
+        set_eax(c, 2);
+        return;
+    }
+    set_eax(c, reg_read_value(vi->second, false, 0, arg(c, 2), arg(c, 3)));
+}
 
 // Descendants may have been created in one call to RegCreateKeyEx. Enumerate
 // each immediate child once, even when the store only holds its descendant.
@@ -955,6 +989,87 @@ void a_RegDeleteKeyW(X86 *c) {
         return;
     }
     g_registry_dirty = true;
+    set_eax(c, 0);
+}
+void a_RegDeleteKeyA(X86 *c) {
+    std::string path = key_path(arg(c, 0), gm_str(arg(c, 1), 512));
+    if (path.empty()) {
+        set_eax(c, 6);
+        return;
+    }
+    if (!reg_children(path).empty()) {
+        set_eax(c, 5);
+        return;
+    }
+    if (!regstore().erase(path)) {
+        set_eax(c, 2);
+        return;
+    }
+    g_registry_dirty = true;
+    set_eax(c, 0);
+}
+void a_RegDeleteValueA(X86 *c) {
+    std::string path = key_path(arg(c, 0), "");
+    if (path.empty()) {
+        set_eax(c, 6);
+        return;
+    }
+    auto it = regstore().find(path);
+    if (it == regstore().end() || !it->second.erase(gm_str(arg(c, 1), 256))) {
+        set_eax(c, 2);
+        return;
+    }
+    g_registry_dirty = true;
+    set_eax(c, 0);
+}
+void a_RegEnumKeyA(X86 *c) {
+    std::string path = key_path(arg(c, 0), "");
+    if (path.empty()) {
+        set_eax(c, 6);
+        return;
+    }
+    auto names = reg_children(path);
+    uint32_t idx = arg(c, 1);
+    if (idx >= names.size()) {
+        set_eax(c, 259);
+        return;
+    }
+    uint32_t out = arg(c, 2), cap = arg(c, 3);
+    if (!out || cap <= names[idx].size()) {
+        set_eax(c, 234);
+        return;
+    }
+    gm_put_str(out, names[idx].c_str(), cap);
+    set_eax(c, 0);
+}
+void a_RegEnumKeyExA(X86 *c) {
+    std::string path = key_path(arg(c, 0), "");
+    if (path.empty()) {
+        set_eax(c, 6);
+        return;
+    }
+    auto names = reg_children(path);
+    uint32_t idx = arg(c, 1);
+    if (idx >= names.size()) {
+        set_eax(c, 259);
+        return;
+    }
+    uint32_t out = arg(c, 2), plen = arg(c, 3);
+    if (!plen || !gm_valid(plen, 4)) {
+        set_eax(c, 87);
+        return;
+    }
+    uint32_t have = rd32(plen), need = (uint32_t)names[idx].size();
+    wr32(plen, need);
+    if (!out || have <= need) {
+        set_eax(c, 234);
+        return;
+    }
+    gm_put_str(out, names[idx].c_str(), have);
+    if (arg(c, 6) && gm_valid(arg(c, 6), 4))
+        wr32(arg(c, 6), 0);
+    if (arg(c, 7) && gm_valid(arg(c, 7), 8))
+        wr64(arg(c, 7), 0);
     set_eax(c, 0);
 }
 void a_RegDeleteValueW(X86 *c) {
@@ -1464,6 +1579,77 @@ void m_mmioSeek(X86 *c) {
         return;
     }
     set_eax(c, (uint32_t)ftell(it->second.fp));
+}
+
+void m_mmioDescend(X86 *c) {
+    auto it = mmios().find(arg(c, 0));
+    uint32_t pck = arg(c, 1), pparent = arg(c, 2), flags = arg(c, 3);
+    if (it == mmios().end() || !pck || !gm_valid(pck, 20)) {
+        set_eax(c, 265); // MMIOERR_CHUNKNOTFOUND
+        return;
+    }
+    FILE *fp = it->second.fp;
+    uint32_t want_id = rd32(pck);
+    uint32_t want_form = rd32(pck + 8);
+    long limit = -1;
+    if (pparent && gm_valid(pparent, 20)) {
+        limit = (long)rd32(pparent + 12) + (long)rd32(pparent + 4);
+    }
+    for (;;) {
+        long pos = ftell(fp);
+        if (limit >= 0 && pos + 8 > limit) {
+            set_eax(c, 265);
+            return;
+        }
+        uint8_t hdr[8];
+        if (fread(hdr, 1, 8, fp) != 8) {
+            set_eax(c, 265);
+            return;
+        }
+        uint32_t ckid = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+        uint32_t cksize = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+        uint32_t data_off = (uint32_t)ftell(fp);
+        uint32_t fcc = 0;
+        bool is_container = (ckid == 0x46464952u /* RIFF */ || ckid == 0x5453494cu /* LIST */);
+        if (is_container) {
+            uint8_t fbuf[4];
+            if (fread(fbuf, 1, 4, fp) != 4) {
+                set_eax(c, 265);
+                return;
+            }
+            fcc = (uint32_t)fbuf[0] | ((uint32_t)fbuf[1] << 8) | ((uint32_t)fbuf[2] << 16) | ((uint32_t)fbuf[3] << 24);
+        }
+        bool match = true;
+        if (flags & 0x10 /* MMIO_FINDCHUNK */) match = (ckid == want_id);
+        else if (flags & 0x20 /* MMIO_FINDRIFF */) match = (ckid == 0x46464952u && (!want_form || fcc == want_form));
+        else if (flags & 0x40 /* MMIO_FINDLIST */) match = (ckid == 0x5453494cu && (!want_form || fcc == want_form));
+        if (match) {
+            wr32(pck + 0, ckid);
+            wr32(pck + 4, cksize);
+            wr32(pck + 8, fcc);
+            wr32(pck + 12, data_off);
+            wr32(pck + 16, 0);
+            set_eax(c, 0);
+            return;
+        }
+        long next = (long)data_off + (long)cksize + (cksize & 1);
+        if (fseek(fp, next, SEEK_SET) != 0) {
+            set_eax(c, 265);
+            return;
+        }
+    }
+}
+
+void m_mmioAscend(X86 *c) {
+    auto it = mmios().find(arg(c, 0));
+    uint32_t pck = arg(c, 1);
+    if (it == mmios().end() || !pck || !gm_valid(pck, 20)) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t cksize = rd32(pck + 4), data_off = rd32(pck + 12);
+    fseek(it->second.fp, (long)data_off + (long)cksize + (cksize & 1), SEEK_SET);
+    set_eax(c, 0);
 }
 
 void m_mmioClose(X86 *c) {
@@ -2251,8 +2437,124 @@ static void avi_no_sample(X86 *c) {
     set_eax(c, 0xffffffffu);
 }
 
+static void a_CryptAcquireContextA(X86 *c) {
+    uint32_t phProv = arg(c, 0);
+    if (phProv) wr32(phProv, 0x43525950u);
+    set_eax(c, 1);
+}
+static void a_CryptReleaseContext(X86 *c) {
+    set_eax(c, 1);
+}
+static void a_CryptGenRandom(X86 *c) {
+    static uint32_t rng = 0x12345678u;
+    uint32_t len = arg(c, 1), buf = arg(c, 2);
+    for (uint32_t i = 0; i < len && buf; i++) {
+        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+        wr8(buf + i, (uint8_t)(rng & 0xff));
+    }
+    set_eax(c, 1);
+}
+
+// SHLWAPI.dll path & color helpers
+static void shlw_PathFindFileNameA(X86 *c) {
+    uint32_t p = arg(c, 0);
+    std::string s = gm_str(p);
+    size_t pos = s.find_last_of("\\/");
+    set_eax(c, pos == std::string::npos ? p : p + (uint32_t)(pos + 1));
+}
+static void shlw_PathFindExtensionA(X86 *c) {
+    uint32_t p = arg(c, 0);
+    std::string s = gm_str(p);
+    size_t slash = s.find_last_of("\\/");
+    size_t dot = s.find_last_of('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        set_eax(c, p + (uint32_t)dot);
+    else
+        set_eax(c, p + (uint32_t)s.size());
+}
+static void shlw_PathStripToRootA(X86 *c) {
+    uint32_t p = arg(c, 0);
+    std::string s = gm_str(p);
+    if (s.size() >= 3 && s[1] == ':' && (s[2] == '\\' || s[2] == '/')) {
+        wr8(p + 3, 0);
+        set_eax(c, 1);
+    } else {
+        set_eax(c, 0);
+    }
+}
+static void shlw_PathFileExistsA(X86 *c) {
+    std::string s = gm_str(arg(c, 0));
+    std::string host = win32_host_path(s);
+    OsStat st{};
+    set_eax(c, (!host.empty() && os_stat(host.c_str(), &st)) ? 1 : 0);
+}
+static void shlw_PathIsUNCA(X86 *c) {
+    std::string s = gm_str(arg(c, 0));
+    set_eax(c, (s.size() >= 2 && s[0] == '\\' && s[1] == '\\') ? 1 : 0);
+}
+static void shlw_PathMatchSpecA(X86 *c) {
+    // Simple case-insensitive '*' / '?' wildcard match
+    std::string str = gm_str(arg(c, 0)), pat = gm_str(arg(c, 1));
+    auto match = [](const std::string &s, const std::string &p) -> bool {
+        size_t si = 0, pi = 0, star = std::string::npos, ss = 0;
+        while (si < s.size()) {
+            if (pi < p.size() && (p[pi] == '?' || std::tolower((unsigned char)p[pi]) == std::tolower((unsigned char)s[si]))) {
+                si++; pi++;
+            } else if (pi < p.size() && p[pi] == '*') {
+                star = pi++; ss = si;
+            } else if (star != std::string::npos) {
+                pi = star + 1; si = ++ss;
+            } else return false;
+        }
+        while (pi < p.size() && p[pi] == '*') pi++;
+        return pi == p.size();
+    };
+    set_eax(c, match(str, pat) ? 1 : 0);
+}
+static void shlw_ColorHLSToRGB(X86 *c) { set_eax(c, 0x00808080u); }
+static void shlw_ColorRGBToHLS(X86 *c) {
+    if (arg(c, 1)) wr16(arg(c, 1), 0);
+    if (arg(c, 2)) wr16(arg(c, 2), 120);
+    if (arg(c, 3)) wr16(arg(c, 3), 0);
+    set_eax(c, 0);
+}
+
+// GOG edition official steam_api.dll shim (SteamAPI_Init -> 1, RestartAppIfNecessary -> 0)
+static void steam_ret0(X86 *c) { set_eax(c, 0); }
+static void steam_ret1(X86 *c) { set_eax(c, 1); }
+static void ws_ret_neg1(X86 *c) { set_eax(c, 0xffffffffu); }
+static void ws_htonl(X86 *c) {
+    uint32_t v = arg(c, 0);
+    set_eax(c, ((v & 0xffu) << 24) | ((v & 0xff00u) << 8) | ((v >> 8) & 0xff00u) | ((v >> 24) & 0xffu));
+}
+static void ws_htons(X86 *c) {
+    uint32_t v = arg(c, 0) & 0xffffu;
+    set_eax(c, ((v & 0xffu) << 8) | ((v >> 8) & 0xffu));
+}
+static void ws_last_err(X86 *c) { set_eax(c, 10035u); } // WSAEWOULDBLOCK
+
 const ImportShim g_misc_shims[] = {
+    // SHLWAPI
+    {"SHLWAPI.dll", "PathFindFileNameA", 1, shlw_PathFindFileNameA},
+    {"SHLWAPI.dll", "PathFindExtensionA", 1, shlw_PathFindExtensionA},
+    {"SHLWAPI.dll", "PathStripToRootA", 1, shlw_PathStripToRootA},
+    {"SHLWAPI.dll", "PathFileExistsA", 1, shlw_PathFileExistsA},
+    {"SHLWAPI.dll", "PathIsUNCA", 1, shlw_PathIsUNCA},
+    {"SHLWAPI.dll", "PathMatchSpecA", 2, shlw_PathMatchSpecA},
+    {"SHLWAPI.dll", "ColorHLSToRGB", 3, shlw_ColorHLSToRGB},
+    {"SHLWAPI.dll", "ColorRGBToHLS", 4, shlw_ColorRGBToHLS},
+    // steam_api (GOG official stub behavior; cdecl -> argc 0)
+    {"steam_api.dll", "SteamAPI_Init", 0, steam_ret1},
+    {"steam_api.dll", "SteamAPI_RestartAppIfNecessary", 0, steam_ret0},
+    {"steam_api.dll", "SteamFriends", 0, steam_ret0},
+    {"steam_api.dll", "SteamApps", 0, steam_ret0},
+    {"steam_api.dll", "SteamUtils", 0, steam_ret0},
+    // DDRAW extra
+    {"DDRAW.dll", "SetAppCompatData", 2, steam_ret0},
     // ADVAPI32
+    {"ADVAPI32.dll", "CryptAcquireContextA", 5, a_CryptAcquireContextA},
+    {"ADVAPI32.dll", "CryptReleaseContext", 2, a_CryptReleaseContext},
+    {"ADVAPI32.dll", "CryptGenRandom", 3, a_CryptGenRandom},
     {"ADVAPI32.dll", "GetUserNameA", 2, a_GetUserNameA},
     {"ADVAPI32.dll", "RegOpenKeyA", 3, a_RegOpenKeyA},
     {"ADVAPI32.dll", "RegOpenKeyExA", 5, a_RegOpenKeyExA},
@@ -2261,6 +2563,12 @@ const ImportShim g_misc_shims[] = {
     {"ADVAPI32.dll", "RegCloseKey", 1, a_RegCloseKey},
     {"ADVAPI32.dll", "RegQueryValueExA", 6, a_RegQueryValueExA},
     {"ADVAPI32.dll", "RegSetValueExA", 6, a_RegSetValueExA},
+    {"ADVAPI32.dll", "RegSetValueA", 5, a_RegSetValueA},
+    {"ADVAPI32.dll", "RegQueryValueA", 4, a_RegQueryValueA},
+    {"ADVAPI32.dll", "RegDeleteKeyA", 2, a_RegDeleteKeyA},
+    {"ADVAPI32.dll", "RegDeleteValueA", 2, a_RegDeleteValueA},
+    {"ADVAPI32.dll", "RegEnumKeyA", 4, a_RegEnumKeyA},
+    {"ADVAPI32.dll", "RegEnumKeyExA", 8, a_RegEnumKeyExA},
     {"ADVAPI32.dll", "RegOpenKeyExW", 5, a_RegOpenKeyExW},
     {"ADVAPI32.dll", "RegCreateKeyExW", 9, a_RegCreateKeyExW},
     {"ADVAPI32.dll", "RegQueryValueExW", 6, a_RegQueryValueExW},
@@ -2288,6 +2596,11 @@ const ImportShim g_misc_shims[] = {
     {"ole32.dll", "CoInitialize", 1, o_CoInitialize},
     {"ole32.dll", "OleInitialize", 1, o_CoInitialize},
     {"ole32.dll", "OleUninitialize", 0, o_CoUninitialize},
+    {"ole32.dll", "CoRegisterMessageFilter", 2, steam_ret0},
+    {"ole32.dll", "CoFreeUnusedLibraries", 0, steam_ret0},
+    {"ole32.dll", "OleFlushClipboard", 0, steam_ret0},
+    {"ole32.dll", "OleIsCurrentClipboard", 1, steam_ret0},
+    {"ole32.dll", "CoRevokeClassObject", 1, steam_ret0},
     {"ole32.dll", "CoInitializeEx", 2, o_CoInitialize},
     {"ole32.dll", "CoTaskMemAlloc", 1, o_CoTaskMemAlloc},
     {"ole32.dll", "CoTaskMemFree", 1, o_CoTaskMemFree},
@@ -2316,6 +2629,29 @@ const ImportShim g_misc_shims[] = {
     {"WSOCK32.dll", "ord52", 1, w_gethostbyname},
     {"WSOCK32.dll", "inet_ntoa", 1, w_inet_ntoa},
     {"WSOCK32.dll", "ord11", 1, w_inet_ntoa},
+    {"WSOCK32.dll", "ord2", 3, ws_ret_neg1},   // bind
+    {"WSOCK32.dll", "ord3", 1, steam_ret0},    // closesocket
+    {"WSOCK32.dll", "ord4", 3, ws_ret_neg1},   // connect
+    {"WSOCK32.dll", "ord5", 3, ws_ret_neg1},   // getpeername
+    {"WSOCK32.dll", "ord6", 3, ws_ret_neg1},   // getsockname
+    {"WSOCK32.dll", "ord8", 1, ws_htonl},      // htonl
+    {"WSOCK32.dll", "ord9", 1, ws_htons},      // htons
+    {"WSOCK32.dll", "ord10", 1, ws_ret_neg1},  // inet_addr
+    {"WSOCK32.dll", "ord12", 3, steam_ret0},   // ioctlsocket
+    {"WSOCK32.dll", "ord13", 2, ws_ret_neg1},  // listen
+    {"WSOCK32.dll", "ord14", 1, ws_htonl},     // ntohl
+    {"WSOCK32.dll", "ord15", 1, ws_htons},     // ntohs
+    {"WSOCK32.dll", "ord16", 4, ws_ret_neg1},  // recv
+    {"WSOCK32.dll", "ord17", 6, ws_ret_neg1},  // recvfrom
+    {"WSOCK32.dll", "ord18", 5, steam_ret0},   // select
+    {"WSOCK32.dll", "ord19", 4, ws_ret_neg1},  // send
+    {"WSOCK32.dll", "ord20", 6, ws_ret_neg1},  // sendto
+    {"WSOCK32.dll", "ord21", 5, steam_ret0},   // setsockopt
+    {"WSOCK32.dll", "ord22", 2, steam_ret0},   // shutdown
+    {"WSOCK32.dll", "ord23", 3, ws_ret_neg1},  // socket
+    {"WSOCK32.dll", "ord101", 4, steam_ret0},  // WSAAsyncSelect
+    {"WSOCK32.dll", "ord111", 0, ws_last_err}, // WSAGetLastError
+    {"WSOCK32.dll", "ord112", 1, steam_ret0},  // WSASetLastError
     // WINMM: implemented
     {"WINMM.dll", "timeGetTime", 0, m_timeGetTime},
     {"WINMM.dll", "timeGetDevCaps", 2, m_timeGetDevCaps},
@@ -2328,6 +2664,8 @@ const ImportShim g_misc_shims[] = {
     {"WINMM.dll", "timeBeginPeriod", 1, m_timeBeginPeriod},
     {"WINMM.dll", "timeEndPeriod", 1, m_timeEndPeriod},
     {"WINMM.dll", "mmioOpenA", 3, m_mmioOpenA},
+    {"WINMM.dll", "mmioDescend", 4, m_mmioDescend},
+    {"WINMM.dll", "mmioAscend", 3, m_mmioAscend},
     {"WINMM.dll", "mmioRead", 3, m_mmioRead},
     {"WINMM.dll", "mmioSeek", 3, m_mmioSeek},
     {"WINMM.dll", "mmioClose", 2, m_mmioClose},
@@ -2443,6 +2781,7 @@ const ImportShim g_misc_shims[] = {
     {"WS2_32.dll", "listen", 2, s_socket_error},
     {"WS2_32.dll", "ord13", 2, s_socket_error},
     {"WS2_32.dll", "accept", 3, s_socket_down},
+    {"WS2_32.dll", "WSAAccept", 5, s_socket_down},
     {"WS2_32.dll", "ord1", 3, s_socket_down},
     {"WS2_32.dll", "send", 4, s_socket_error},
     {"WS2_32.dll", "ord19", 4, s_socket_error},

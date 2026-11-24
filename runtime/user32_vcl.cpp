@@ -368,6 +368,7 @@ void is_visible(X86 *c) {
         visible = visible && w->visible;
         w = find_window(w->parent);
     }
+    LOGV("IsWindowVisible(%08x) -> %d", arg(c, 0), visible ? 1 : 0);
     set_eax(c, visible);
 }
 void is_enabled(X86 *c) {

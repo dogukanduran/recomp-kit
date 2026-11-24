@@ -186,6 +186,9 @@ void note_screen_size() {
         return;
     g_screen_w.store(w);
     g_screen_h.store(h);
+    host_display_set_screen(w, h);
+    host_display_offer_mode(w, h, 16);
+    host_display_offer_mode(w, h, 32);
 }
 
 // The window's size in points and in drawable pixels.
@@ -443,12 +446,13 @@ bool pointer_capture_wanted() {
 void update_platform_pointer_capture() {
     const bool want = g_platform_capture_requested && pointer_capture_wanted() &&
                       !g_close_requested && !g_fullscreen_transition;
-    if (want && !g_pointer_hidden) {
+    const bool hide_cursor = want && !host_cursor_visible();
+    if (hide_cursor && !g_pointer_hidden) {
         trace_state("capture ON: hiding the OS cursor");
         SDL_HideCursor();
         g_pointer_hidden = true;
     }
-    if (!want && g_pointer_hidden) {
+    if (!hide_cursor && g_pointer_hidden) {
         trace_state("capture OFF: showing the OS cursor");
         SDL_ShowCursor();
         g_pointer_hidden = false;
@@ -459,7 +463,7 @@ void update_platform_pointer_capture() {
     // window's resize edges remain reachable.
     int bw, bh, dw, dh;
     window_sizes(&bw, &bh, &dw, &dh);
-    HostRect rect = host_pointer_confinement_wanted(want, g_window_mode) && g_window
+    HostRect rect = host_pointer_confinement_wanted(hide_cursor, g_window_mode) && g_window
                         ? host_pointer_confinement_rect({0, 0, double(bw), double(bh)})
                         : HostRect{};
     if (g_window && (rect.x != g_pointer_confinement.x || rect.y != g_pointer_confinement.y ||
@@ -1706,7 +1710,6 @@ void web_frame() {
         g_web_dw = dw;
         g_web_dh = dh;
         host_present_resize(dw, dh);
-        host_display_set_screen(dw, dh);
     }
     host_d9_pump();
     host_present_pump();
@@ -1802,7 +1805,27 @@ int web_main(int argc, char **argv) {
     }
     g_web_dw = dw;
     g_web_dh = dh;
-    host_display_set_screen(dw, dh);
+    const int screen_css_w = EM_ASM_INT({ return window.screen ? window.screen.width : 0; });
+    const int screen_css_h = EM_ASM_INT({ return window.screen ? window.screen.height : 0; });
+    const int screen_phys_w = EM_ASM_INT({
+        return window.screen ? Math.round(window.screen.width * (window.devicePixelRatio || 1)) : 0;
+    });
+    const int screen_phys_h = EM_ASM_INT({
+        return window.screen ? Math.round(window.screen.height * (window.devicePixelRatio || 1)) : 0;
+    });
+    if (screen_css_w >= 640 && screen_css_h >= 480) {
+        host_display_offer_mode(screen_css_w, screen_css_h, 16);
+        host_display_offer_mode(screen_css_w, screen_css_h, 32);
+    }
+    if (screen_phys_w >= 640 && screen_phys_h >= 480) {
+        host_display_offer_mode(screen_phys_w, screen_phys_h, 16);
+        host_display_offer_mode(screen_phys_w, screen_phys_h, 32);
+        host_display_set_screen(screen_phys_w, screen_phys_h);
+    } else {
+        host_display_set_screen(dw, dh);
+    }
+    host_display_offer_mode(dw, dh, 16);
+    host_display_offer_mode(dw, dh, 32);
 
     D3DRenderer *renderer = new D3DRenderer(g_gpu.get());
     if (!renderer->ok())

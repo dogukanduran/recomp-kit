@@ -72,6 +72,13 @@ void win32_display_mode(uint32_t *w, uint32_t *h, uint32_t *bpp) {
         return;
     if (ddraw_display_mode(w, h, bpp))
         return;
+    int32_t sw = 0, sh = 0;
+    if (host_display_screen(&sw, &sh) && sw >= 640 && sh >= 480) {
+        *w = uint32_t(sw);
+        *h = uint32_t(sh);
+        *bpp = 32;
+        return;
+    }
     *w = RECOMP_DESKTOP_WIDTH;
     *h = RECOMP_DESKTOP_HEIGHT;
     *bpp = 32;
@@ -250,6 +257,45 @@ uint32_t gdi_image_bitmap(const GdiImage &image) {
     uint32_t h = make_dib(image.width, -image.height, 32, 0, 0);
     if (h)
         memcpy(g_mem + dib_of(h)->bits, image.pixels.data(), image.pixels.size() * 4);
+    return h;
+}
+uint32_t gdi_create_dib_from_packed(uint32_t at, uint32_t bytes, uint32_t pixel_offset) {
+    if (!at || bytes < 40 || !gm_valid(at, bytes))
+        return 0;
+    uint32_t header = rd32(at);
+    if (header < 40 || header > bytes || rd16(at + 12) != 1)
+        return 0;
+    int32_t width = int32_t(rd32(at + 4));
+    int32_t height = int32_t(rd32(at + 8));
+    uint16_t bpp = rd16(at + 14);
+    uint32_t compression = rd32(at + 16);
+    if (compression != 0 && compression != 3)
+        return 0;
+    uint32_t clr_used = rd32(at + 32);
+    uint32_t pal_count = (bpp <= 8) ? (clr_used ? clr_used : (1u << bpp)) : 0;
+    uint32_t masks_bytes = (compression == 3 && header == 40) ? 12u : 0u;
+    uint32_t pal_off = header + masks_bytes;
+    uint32_t bits_off = pixel_offset ? pixel_offset : (pal_off + pal_count * 4u);
+    if (bits_off > bytes)
+        return 0;
+    uint32_t h = make_dib(width, height, bpp, compression, 0);
+    if (!h)
+        return 0;
+    Dib *d = dib_of(h);
+    if (compression == 3 && header >= 40 && pal_off >= 52 && at + 40 + 12 <= at + bytes) {
+        d->masks[0] = rd32(at + 40);
+        d->masks[1] = rd32(at + 44);
+        d->masks[2] = rd32(at + 48);
+    }
+    if (pal_count && pal_off + pal_count * 4u <= bytes) {
+        d->colors.resize(pal_count);
+        for (uint32_t i = 0; i < pal_count; ++i)
+            d->colors[i] = rd32(at + pal_off + i * 4u) & 0x00ffffffu;
+    }
+    uint32_t avail = bytes - bits_off;
+    uint32_t copy = avail < d->size ? avail : d->size;
+    if (copy && d->bits)
+        memcpy(g_mem + d->bits, g_mem + at + bits_off, copy);
     return h;
 }
 uint32_t gdi_image_mask(const GdiImage &image) {
@@ -1460,6 +1506,51 @@ void brush_indirect(X86 *c) {
 void pen_indirect(X86 *c) {
     indirect_object(c, true);
 }
+void create_pen(X86 *c) {
+    Object o;
+    o.kind = Object::Pen;
+    o.style = arg(c, 0);
+    o.width = int32_t(arg(c, 1));
+    o.color = arg(c, 2);
+    set_eax(c, make_object(o));
+}
+void set_palette_entries(X86 *c) {
+    auto it = palettes().find(arg(c, 0));
+    uint32_t start = arg(c, 1), count = arg(c, 2), entries = arg(c, 3);
+    if (it == palettes().end() || !entries || start >= it->second.entries.size()) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t n = std::min<uint32_t>(count, uint32_t(it->second.entries.size()) - start);
+    if (!gm_valid(entries, n * 4)) {
+        set_eax(c, 0);
+        return;
+    }
+    for (uint32_t i = 0; i < n; ++i)
+        it->second.entries[start + i] = rd32(entries + i * 4) & 0xffffffu;
+    set_eax(c, n);
+}
+void offset_viewport_org(X86 *c) {
+    auto *dc = dc_of(arg(c, 0));
+    uint32_t out = arg(c, 3);
+    if (!dc || (out && !gm_valid(out, 8))) {
+        set_eax(c, 0);
+        return;
+    }
+    if (out) {
+        wr32(out, uint32_t(dc->viewport_x));
+        wr32(out + 4, uint32_t(dc->viewport_y));
+    }
+    dc->viewport_x += int32_t(arg(c, 1));
+    dc->viewport_y += int32_t(arg(c, 2));
+    set_eax(c, 1);
+}
+void gdi_ret1(X86 *c) {
+    set_eax(c, 1);
+}
+void gdi_ret0(X86 *c) {
+    set_eax(c, 0);
+}
 void stock_object(X86 *c) {
     uint32_t i = arg(c, 0);
     set_eax(c, i <= 19 ? 0x4f100 + i : 0);
@@ -1622,6 +1713,19 @@ void gdi_model_register() {
     static const ImportShim shims[] = {G("CreateSolidBrush", 1, solid_brush),
                                        G("CreateBrushIndirect", 1, brush_indirect),
                                        G("CreatePenIndirect", 1, pen_indirect),
+                                       G("CreatePen", 3, create_pen),
+                                       G("SetPaletteEntries", 4, set_palette_entries),
+                                       G("OffsetViewportOrgEx", 4, offset_viewport_org),
+                                       G("SetMapMode", 2, gdi_ret1),
+                                       G("SetWindowExtEx", 4, gdi_ret1),
+                                       G("SetViewportExtEx", 4, gdi_ret1),
+                                       G("ScaleWindowExtEx", 6, gdi_ret1),
+                                       G("ScaleViewportExtEx", 6, gdi_ret1),
+                                       G("PtVisible", 3, gdi_ret1),
+                                       G("Escape", 5, gdi_ret0),
+                                       G("ChoosePixelFormat", 2, gdi_ret0),
+                                       G("SetPixelFormat", 3, gdi_ret0),
+                                       G("SwapBuffers", 1, gdi_ret0),
                                        G("GetStockObject", 1, stock_object),
                                        G("GetPixel", 3, get_pixel),
                                        G("SetPixel", 4, set_pixel),

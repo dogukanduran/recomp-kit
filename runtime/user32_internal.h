@@ -53,6 +53,13 @@ struct Window {
     // colour transparent, LWA_ALPHA (2) applies one opacity to the whole
     // window. Both are honoured where the window surfaces are composited.
     uint32_t layered_flags = 0, layered_key = 0, layered_alpha = 255;
+    struct ListItem {
+        std::string text;
+        uint32_t data = 0;
+    };
+    std::vector<ListItem> items;
+    int32_t cur_sel = -1;
+    uint32_t btn_check = 0, btn_state = 0;
 };
 
 struct Msg {

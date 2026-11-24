@@ -229,7 +229,7 @@ extern "C" __attribute__((weak)) int ddraw_add_mode(int, int, int) {
     return 0;
 }
 extern "C" int host_display_offer_mode(int w, int h, int bpp) {
-    if (w <= 0 || h <= 0 || (bpp != 8 && bpp != 16))
+    if (w <= 0 || h <= 0 || (bpp != 8 && bpp != 16 && bpp != 32))
         return 0;
     // The front end unconditionally requests BOTH depths. Never remove them.
     // Selecting Classic must also leave the higher modes in the menu.

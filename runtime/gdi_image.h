@@ -16,6 +16,7 @@ bool gdi_draw_image(uint32_t dc, const GdiImage &image, int32_t x, int32_t y, in
 // Decode a Windows DIB resource. BMP files may supply a pixel offset
 // relative to the DIB header; zero selects packed resource layout.
 bool gdi_decode_image(uint32_t dib, uint32_t bytes, GdiImage *image, uint32_t pixel_offset = 0);
+uint32_t gdi_create_dib_from_packed(uint32_t dib, uint32_t bytes, uint32_t pixel_offset = 0);
 uint32_t gdi_create_icon(const GdiImage &image);
 bool gdi_read_icon(uint32_t icon, GdiImage *image);
 bool gdi_delete_icon(uint32_t icon);

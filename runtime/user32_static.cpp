@@ -119,13 +119,44 @@ void static_proc(X86 *c) {
 void ensure_system_classes() {
     if (classes().count("static"))
         return;
-    WndClass wc;
-    wc.style = 0x4088; // CS_GLOBALCLASS | CS_PARENTDC | CS_DBLCLKS
-    wc.wndproc = imports_alloc_trampoline("USER32.dll", "STATIC window procedure", static_proc, 4);
-    wc.name = "Static";
-    wc.unicode = true;
-    wc.atom = 0xc000 + uint32_t(classes().size());
-    classes()["static"] = wc;
-    classes()["#atom" + std::to_string(wc.atom)] = wc;
+    auto reg = [](const char *key, const char *name, uint32_t proc, uint32_t style = 0x4088) {
+        WndClass wc;
+        wc.style = style;
+        wc.wndproc = proc;
+        wc.name = name;
+        wc.unicode = false;
+        wc.atom = 0xc000 + uint32_t(classes().size());
+        classes()[key] = wc;
+        classes()["#atom" + std::to_string(wc.atom)] = wc;
+    };
+    uint32_t static_wndproc =
+        imports_alloc_trampoline("USER32.dll", "STATIC window procedure", static_proc, 4);
+    uint32_t def_wndproc = imports_resolve("USER32.dll", "DefWindowProcA");
+    reg("static", "Static", static_wndproc);
+    classes()["static"].unicode = true;
+    reg("button", "Button", def_wndproc, 0x4008);
+    reg("edit", "Edit", def_wndproc, 0x4088);
+    reg("combobox", "ComboBox", def_wndproc, 0x4088);
+    reg("listbox", "ListBox", def_wndproc, 0x4088);
+    reg("scrollbar", "ScrollBar", def_wndproc, 0x4088);
+    reg("mdiclient", "MDIClient", def_wndproc, 0x4000);
+    reg("#32770", "#32770", def_wndproc, 0x4808);
+    reg("msctls_trackbar32", "msctls_trackbar32", def_wndproc, 0x4008);
+    reg("msctls_updown32", "msctls_updown32", def_wndproc, 0x4008);
+    reg("msctls_progress32", "msctls_progress32", def_wndproc, 0x4008);
+    reg("msctls_statusbar32", "msctls_statusbar32", def_wndproc, 0x4008);
+    reg("msctls_hotkey32", "msctls_hotkey32", def_wndproc, 0x4008);
+    reg("syslistview32", "SysListView32", def_wndproc, 0x4008);
+    reg("systreeview32", "SysTreeView32", def_wndproc, 0x4008);
+    reg("systabcontrol32", "SysTabControl32", def_wndproc, 0x4008);
+    reg("sysheader32", "SysHeader32", def_wndproc, 0x4008);
+    reg("sysanimate32", "SysAnimate32", def_wndproc, 0x4008);
+    reg("tooltips_class32", "tooltips_class32", def_wndproc, 0x4008);
+    reg("toolbarwindow32", "ToolbarWindow32", def_wndproc, 0x4008);
+    reg("rebarwindow32", "ReBarWindow32", def_wndproc, 0x4008);
+    reg("comboboxex32", "ComboBoxEx32", def_wndproc, 0x4008);
+    reg("richedit", "RichEdit", def_wndproc, 0x4008);
+    reg("richedit20a", "RichEdit20A", def_wndproc, 0x4008);
+    reg("richedit20w", "RichEdit20W", def_wndproc, 0x4008);
 }
 } // namespace user32

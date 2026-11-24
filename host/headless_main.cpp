@@ -37,6 +37,7 @@
 #include "audio_capture.h"
 #include "../platform/os.h"
 #include "boot.h"
+#include "input.h"
 #include "page_overlay.h"
 #include "../runtime/guest.h"
 #include "../runtime/loader.h"
@@ -71,6 +72,86 @@ double g_max_seconds = 180.0;
 uint32_t g_frame_every = 10;
 std::string g_frames_dir = "build/recomp/frames";
 bool g_activate = true;
+
+struct ScheduledClick {
+    uint32_t frame;
+    int32_t x, y;
+};
+std::vector<ScheduledClick> g_clicks;
+
+void parse_clicks(const char *spec) {
+    if (!spec)
+        return;
+    const char *p = spec;
+    while (*p) {
+        char *end = nullptr;
+        unsigned long f = strtoul(p, &end, 10);
+        if (!end || *end != ':')
+            break;
+        long x = strtol(end + 1, &end, 10);
+        if (!end || *end != ':')
+            break;
+        long y = strtol(end + 1, &end, 10);
+        g_clicks.push_back({(uint32_t)f, (int32_t)x, (int32_t)y});
+        if (!end || (*end != ',' && *end != ';'))
+            break;
+        p = end + 1;
+    }
+}
+
+// RECOMP_KEY_AT="frame:mac_keycode:down(0/1),..." injects keyboard events.
+struct ScheduledKey {
+    uint32_t frame;
+    uint16_t key;
+    bool down;
+};
+std::vector<ScheduledKey> g_key_events;
+void parse_keys(const char *spec) {
+    if (!spec)
+        return;
+    const char *p = spec;
+    while (*p) {
+        char *end = nullptr;
+        unsigned long f = strtoul(p, &end, 10);
+        if (!end || *end != ':')
+            break;
+        unsigned long k = strtoul(end + 1, &end, 0);
+        if (!end || *end != ':')
+            break;
+        unsigned long d = strtoul(end + 1, &end, 10);
+        g_key_events.push_back({(uint32_t)f, (uint16_t)k, d != 0});
+        if (!end || (*end != ',' && *end != ';'))
+            break;
+        p = end + 1;
+    }
+}
+
+void maybe_fire_clicks(uint32_t frame) {
+    uint32_t hwnd = host_main_window();
+    if (!hwnd)
+        return;
+    for (const auto &k : g_key_events)
+        if (frame == k.frame) {
+            printf("[host] key %02x %s on frame %u\n", k.key, k.down ? "down" : "up", frame);
+            fflush(stdout);
+            host_input_key(k.key, k.down);
+        }
+    for (const auto &cl : g_clicks) {
+        if (frame == cl.frame) {
+            printf("[host] click down at (%d, %d) on frame %u\n", cl.x, cl.y, frame);
+            fflush(stdout);
+            host_set_client_cursor_pos(hwnd, cl.x, cl.y);
+            host_post_client_mouse_message(hwnd, 0x0200 /* WM_MOUSEMOVE */, 0, cl.x, cl.y);
+            host_post_client_mouse_message(hwnd, 0x0201 /* WM_LBUTTONDOWN */, 1 /* MK_LBUTTON */,
+                                           cl.x, cl.y);
+        } else if (frame == cl.frame + 3) {
+            printf("[host] click up at (%d, %d) on frame %u\n", cl.x, cl.y, frame);
+            fflush(stdout);
+            host_set_client_cursor_pos(hwnd, cl.x, cl.y);
+            host_post_client_mouse_message(hwnd, 0x0202 /* WM_LBUTTONUP */, 0, cl.x, cl.y);
+        }
+    }
+}
 
 // --- run state -------------------------------------------------------------
 uint32_t g_present_count = 0; // host_present calls
@@ -184,6 +265,7 @@ extern "C" void host_present(const void *pixels, int w, int h, int bpp, const ui
         else if (bpp == 32)
             ++g_present32;
     }
+    maybe_fire_clicks(index);
 
     if (!pixels || w <= 0 || h <= 0)
         return;
@@ -610,6 +692,8 @@ int main(int argc, char **argv) {
         g_frames_dir = v;
     if (recomp_env("NO_ACTIVATE"))
         g_activate = false;
+    parse_clicks(recomp_env("CLICK_AT"));
+    parse_keys(recomp_env("KEY_AT"));
 
     mkdir_p(g_frames_dir);
 

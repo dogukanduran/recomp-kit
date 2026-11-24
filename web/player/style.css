@@ -5,3 +5,16 @@ html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 14px 
   #status a { pointer-events: auto; color: #8cf; }
   #stream { position: fixed; left: 8px; bottom: 8px; padding: 3px 8px; border-radius: 4px;
             background: rgba(0, 0, 0, .55); color: #bbb; font-size: 12px; pointer-events: none; }
+  #fs-banner { position: fixed; top: 10px; right: 10px; display: flex; align-items: center; gap: 8px;
+               padding: 6px 10px; border-radius: 8px; background: rgba(16, 18, 24, .82);
+               border: 1px solid rgba(255, 255, 255, .16); color: #e6e8ee; font-size: 12px;
+               backdrop-filter: blur(6px); z-index: 10; transition: opacity .2s ease; }
+  #fs-banner.compact #fs-text, #fs-banner.compact #fs-dismiss { display: none; }
+  #fs-banner.compact { opacity: .45; padding: 4px 6px; }
+  #fs-banner.compact:hover { opacity: 1; }
+  #fs-banner button { font: inherit; padding: 4px 9px; border-radius: 5px;
+                      border: 1px solid rgba(255, 255, 255, .22); background: #2f5bd3;
+                      color: #fff; cursor: pointer; white-space: nowrap; }
+  #fs-banner button:hover { background: #3f6be3; }
+  #fs-banner #fs-dismiss { background: transparent; border-color: transparent; color: #aaa; padding: 2px 6px; }
+  #fs-banner #fs-dismiss:hover { color: #fff; background: rgba(255, 255, 255, .1); }

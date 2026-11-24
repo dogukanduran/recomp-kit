@@ -70,22 +70,24 @@ WatchArm g_watch_arm;
 // slow to reach the moment worth reading.
 const char *watch_writer() {
 #if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
-    static char out[128];
+    static char out[256];
     void *frames[32];
     const int n = backtrace(frames, 32);
     char **names = backtrace_symbols(frames, n);
     if (!names)
         return "?";
     out[0] = 0;
-    for (int i = 1; i < n; ++i) {
+    size_t pos = 0;
+    int got = 0;
+    for (int i = 1; i < n && got < 10; ++i) {
         const char *fn = strstr(names[i], "fn_00");
         if (!fn)
             continue;
         size_t k = 0;
-        while (k + 1 < sizeof out && fn[k] && fn[k] != ' ')
+        while (fn[k] && fn[k] != ' ')
             ++k;
-        snprintf(out, sizeof out, "%.*s", (int)k, fn);
-        break;
+        pos += (size_t)snprintf(out + pos, sizeof out - pos, "%s%.*s", got ? " <- " : "", (int)k, fn);
+        ++got;
     }
     free(names);
     return out[0] ? out : "?";

@@ -623,6 +623,8 @@ const ImportShim shims[] = {
     {"COMCTL32.dll", "ImageList_DragLeave", 1, yes},
     {"COMCTL32.dll", "ImageList_DragShowNolock", 1, yes},
     {"COMCTL32.dll", "InitializeFlatSB", 1, yes},
+    {"COMCTL32.dll", "InitCommonControlsEx", 1, yes},
+    {"COMCTL32.dll", "InitCommonControls", 0, yes},
     {"COMCTL32.dll", "_TrackMouseEvent", 1, yes},
     {"COMCTL32.dll", "FlatSB_GetScrollPos", 2, win32_get_scroll_pos},
     {"COMCTL32.dll", "FlatSB_SetScrollPos", 4, win32_set_scroll_pos},

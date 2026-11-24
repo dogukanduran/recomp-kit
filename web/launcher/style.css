@@ -26,6 +26,7 @@
   .state { font-weight: 600; }
   .state.ready { color: var(--ready); } .state.warn { color: var(--warn); } .state.bad { color: var(--bad); }
   .detail { color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+  .detail.tip { padding: 6px 9px; border-radius: 6px; border: 1px solid var(--line); background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
   button, .button { font: inherit; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--line);
                     background: transparent; color: var(--text); cursor: pointer; text-decoration: none; }

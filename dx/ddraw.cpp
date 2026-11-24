@@ -185,8 +185,12 @@ struct Mode {
     uint32_t w, h, bpp;
 };
 const Mode kBuiltInModes[] = {
-    {640, 480, 8},   {640, 480, 16},  {800, 600, 8},    {800, 600, 16},   {1024, 768, 8},
-    {1024, 768, 16}, {1280, 720, 16}, {1920, 1080, 16}, {2560, 1440, 16}, {3840, 2160, 16},
+    {640, 480, 8},    {640, 480, 16},   {640, 480, 32},   {800, 600, 8},    {800, 600, 16},
+    {800, 600, 32},   {1024, 768, 8},   {1024, 768, 16},  {1024, 768, 32},  {1152, 864, 32},
+    {1280, 720, 16},  {1280, 720, 32},  {1280, 800, 32},  {1280, 960, 32},  {1280, 1024, 32},
+    {1366, 768, 32},  {1440, 900, 32},  {1600, 900, 32},  {1600, 1200, 32}, {1680, 1050, 32},
+    {1920, 1080, 16}, {1920, 1080, 32}, {1920, 1200, 32}, {2560, 1440, 16}, {2560, 1440, 32},
+    {2560, 1600, 32}, {3840, 2160, 16}, {3840, 2160, 32},
 };
 
 std::vector<Mode> &mode_table() {
@@ -221,7 +225,7 @@ bool parse_one_mode(const char *&p, Mode *out) {
         return false;
     if (!m.w || !m.h)
         return false;
-    if (m.bpp != 8 && m.bpp != 16)
+    if (m.bpp != 8 && m.bpp != 16 && m.bpp != 32)
         return false;
     *out = m;
     return true;
@@ -1492,7 +1496,7 @@ int ddraw_set_modes(const char *spec) {
 }
 
 int ddraw_add_mode(int w, int h, int bpp) {
-    if (w <= 0 || h <= 0 || w > 65535 || h > 65535 || (bpp != 8 && bpp != 16))
+    if (w <= 0 || h <= 0 || w > 65535 || h > 65535 || (bpp != 8 && bpp != 16 && bpp != 32))
         return 0;
     const auto &offered = modes();
     if (!has_mode(offered, w, h, bpp))
@@ -4411,6 +4415,11 @@ void DD_EnumDisplayModes(X86 *c) {
             want_bpp = rd32(match + DDSD_OFF_ddpfPixelFormat + DDPF_OFF_dwRGBBitCount);
     }
 
+    int32_t sw = 0, sh = 0;
+    if (host_display_screen(&sw, &sh) && sw >= 640 && sh >= 480) {
+        ddraw_add_mode(sw, sh, 16);
+        ddraw_add_mode(sw, sh, 32);
+    }
     for (const Mode &m : modes()) {
         if (want_w && m.w != want_w)
             continue;
@@ -4436,6 +4445,12 @@ void DD_EnumDisplayModes(X86 *c) {
         if (m.bpp == 8) {
             wr32(pf + DDPF_OFF_dwFlags, DDPF_RGB | DDPF_PALETTEINDEXED8);
             wr32(pf + DDPF_OFF_dwRGBBitCount, 8);
+        } else if (m.bpp == 32) {
+            wr32(pf + DDPF_OFF_dwFlags, DDPF_RGB);
+            wr32(pf + DDPF_OFF_dwRGBBitCount, 32);
+            wr32(pf + DDPF_OFF_dwRBitMask, 0x00ff0000);
+            wr32(pf + DDPF_OFF_dwGBitMask, 0x0000ff00);
+            wr32(pf + DDPF_OFF_dwBBitMask, 0x000000ff);
         } else {
             wr32(pf + DDPF_OFF_dwFlags, DDPF_RGB);
             wr32(pf + DDPF_OFF_dwRGBBitCount, 16);
@@ -4530,6 +4545,12 @@ void DD_GetDisplayMode(X86 *c) {
     if (bpp == 8) {
         wr32(pf + DDPF_OFF_dwFlags, DDPF_RGB | DDPF_PALETTEINDEXED8);
         wr32(pf + DDPF_OFF_dwRGBBitCount, 8);
+    } else if (bpp == 32) {
+        wr32(pf + DDPF_OFF_dwFlags, DDPF_RGB);
+        wr32(pf + DDPF_OFF_dwRGBBitCount, 32);
+        wr32(pf + DDPF_OFF_dwRBitMask, 0x00ff0000);
+        wr32(pf + DDPF_OFF_dwGBitMask, 0x0000ff00);
+        wr32(pf + DDPF_OFF_dwBBitMask, 0x000000ff);
     } else {
         wr32(pf + DDPF_OFF_dwFlags, DDPF_RGB);
         wr32(pf + DDPF_OFF_dwRGBBitCount, bpp);
@@ -4643,10 +4664,20 @@ void set_display_mode(X86 *c, uint32_t w, uint32_t h, uint32_t bpp) {
         com_ret(c, DDERR_INVALIDOBJECT);
         return;
     }
+    int32_t sw = 0, sh = 0;
+    if (host_display_screen(&sw, &sh) && sw >= 640 && sh >= 480) {
+        ddraw_add_mode(sw, sh, 16);
+        ddraw_add_mode(sw, sh, 32);
+    }
     bool known = false;
     for (const Mode &m : modes())
         if (m.w == w && m.h == h && m.bpp == bpp)
             known = true;
+    if (!known && (bpp == 8 || bpp == 16 || bpp == 32) && w >= 320 && h >= 200 && w <= 8192 &&
+        h <= 8192) {
+        ddraw_add_mode((int)w, (int)h, (int)bpp);
+        known = true;
+    }
     if (!known) {
         LOGW("ddraw: SetDisplayMode(%u, %u, %u) is not one of the offered modes", w, h, bpp);
         com_ret(c, DDERR_INVALIDPARAMS);

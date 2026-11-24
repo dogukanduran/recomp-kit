@@ -720,8 +720,102 @@ void k_LocalAlloc(X86 *c) {
     uint32_t flags = arg(c, 0), size = arg(c, 1);
     set_eax(c, heap_alloc(size, (flags & 0x40) != 0));
 }
+void k_LocalReAlloc(X86 *c) {
+    set_eax(c, heap_realloc(arg(c, 0), arg(c, 1), (arg(c, 2) & 0x40) != 0));
+}
 void k_LocalFree(X86 *c) {
     set_eax(c, heap_free(arg(c, 0)) ? 0 : arg(c, 0));
+}
+void k_GlobalHandle(X86 *c) {
+    set_eax(c, arg(c, 0));
+}
+void k_GlobalFlags(X86 *c) {
+    set_eax(c, 0);
+}
+void k_lstrcmpA(X86 *c) {
+    std::string a = gm_str(arg(c, 0)), b = gm_str(arg(c, 1));
+    int r = a.compare(b);
+    set_eax(c, r < 0 ? 0xffffffffu : (r > 0 ? 1u : 0u));
+}
+void k_lstrcpynA(X86 *c) {
+    uint32_t dst = arg(c, 0), src = arg(c, 1);
+    int maxc = (int)arg(c, 2);
+    if (dst && maxc > 0) {
+        std::string s = gm_str(src);
+        int n = std::min((int)s.size(), maxc - 1);
+        for (int i = 0; i < n; i++) wr8(dst + i, (uint8_t)s[i]);
+        wr8(dst + n, 0);
+    }
+    set_eax(c, dst);
+}
+void k_GetDiskFreeSpaceExA(X86 *c) {
+    const uint64_t avail = 10ull * 1024 * 1024 * 1024; // 10 GB
+    const uint64_t total = 100ull * 1024 * 1024 * 1024;
+    auto put64 = [](uint32_t p, uint64_t v) {
+        if (!p) return;
+        wr32(p, (uint32_t)(v & 0xffffffffu));
+        wr32(p + 4, (uint32_t)(v >> 32));
+    };
+    put64(arg(c, 1), avail);
+    put64(arg(c, 2), total);
+    put64(arg(c, 3), avail);
+    set_eax(c, 1);
+}
+void k_GetFileTime(X86 *c) {
+    for (int i = 1; i <= 3; i++) {
+        uint32_t p = arg(c, i);
+        if (p) { wr32(p, 0x01d6a000u); wr32(p + 4, 0x01d6a000u); }
+    }
+    set_eax(c, 1);
+}
+void k_CreateProcessA(X86 *c) { set_eax(c, 0); }
+void k_GetProfileStringA(X86 *c) {
+    std::string def = gm_str(arg(c, 2));
+    uint32_t out = arg(c, 3), sz = arg(c, 4);
+    uint32_t n = (out && sz) ? gm_put_str(out, def.c_str(), sz) : 0;
+    set_eax(c, n);
+}
+void k_GetProfileIntA(X86 *c) { set_eax(c, arg(c, 2)); }
+void k_WriteProfileStringA(X86 *c) { set_eax(c, 1); }
+static std::map<uint16_t, std::string> &global_atoms() {
+    static auto *m = new std::map<uint16_t, std::string>();
+    return *m;
+}
+static uint16_t g_next_atom = 0xc000;
+void k_GlobalAddAtomA(X86 *c) {
+    uint32_t p = arg(c, 0);
+    if (!p) { set_eax(c, 0); return; }
+    if (p < 0x10000u) { set_eax(c, p); return; }
+    std::string s = gm_str(p, 256);
+    for (const auto &kv : global_atoms()) {
+        if (os_strcasecmp(kv.second.c_str(), s.c_str()) == 0) {
+            set_eax(c, kv.first);
+            return;
+        }
+    }
+    uint16_t a = g_next_atom++;
+    global_atoms()[a] = s;
+    set_eax(c, a);
+}
+void k_GlobalFindAtomA(X86 *c) {
+    uint32_t p = arg(c, 0);
+    if (!p) { set_eax(c, 0); return; }
+    if (p < 0x10000u) { set_eax(c, p); return; }
+    std::string s = gm_str(p, 256);
+    for (const auto &kv : global_atoms()) {
+        if (os_strcasecmp(kv.second.c_str(), s.c_str()) == 0) {
+            set_eax(c, kv.first);
+            return;
+        }
+    }
+    set_eax(c, 0);
+}
+void k_GlobalGetAtomNameA(X86 *c) {
+    uint16_t a = (uint16_t)arg(c, 0);
+    uint32_t buf = arg(c, 1), cap = arg(c, 2);
+    auto it = global_atoms().find(a);
+    if (it == global_atoms().end() || !buf || !cap) { set_eax(c, 0); return; }
+    set_eax(c, gm_put_str(buf, it->second.c_str(), cap));
 }
 
 // Virtual regions are whole 4 KB pages, base and size, so two allocations can
@@ -1962,6 +2056,7 @@ void k_CreateSemaphoreA(X86 *c) {
     uint32_t h = handle_new(H_SEM);
     handles()[h].count = (int32_t)arg(c, 1);
     handles()[h].max_count = (int32_t)arg(c, 2);
+    set_last_error(0);
     LOGV("CreateSemaphoreA(initial=%d max=%d) -> %08x", handles()[h].count, handles()[h].max_count,
          h);
     set_eax(c, h);
@@ -5673,6 +5768,50 @@ void k_Process32Next(X86 *c) {
     set_eax(c, 0);
 }
 
+void k_GetWindowsDirectoryA(X86 *c) {
+    uint32_t buf = arg(c, 0), cap = arg(c, 1);
+    const char *dir = "C:\\WINDOWS";
+    uint32_t len = 10;
+    if (!buf || cap <= len) {
+        set_eax(c, len + 1);
+        return;
+    }
+    gm_put_str(buf, dir, cap);
+    set_eax(c, len);
+}
+
+void k_LockUnlockFile(X86 *c) {
+    set_eax(c, 1);
+}
+
+void k_ConvertDefaultLocale(X86 *c) {
+    uint32_t lcid = arg(c, 0);
+    set_eax(c, (lcid == 0x0400u || lcid == 0x0800u || lcid == 0) ? 0x0409u : lcid);
+}
+
+void k_GetPrivateProfileIntA(X86 *c) {
+    set_eax(c, arg(c, 2)); // nDefault
+}
+
+void k_GetPrivateProfileStringA(X86 *c) {
+    std::string def = arg(c, 2) ? gm_str(arg(c, 2)) : "";
+    uint32_t dst = arg(c, 3), sz = arg(c, 4);
+    if (!dst || !sz) {
+        set_eax(c, 0);
+        return;
+    }
+    gm_put_str(dst, def.c_str(), sz);
+    set_eax(c, (uint32_t)std::min<size_t>(def.size(), sz - 1));
+}
+
+void k_FormatMessageA(X86 *c) {
+    uint32_t flags = arg(c, 0), buf = arg(c, 4), size = arg(c, 5);
+    if (!(flags & 0x00000100u /* FORMAT_MESSAGE_ALLOCATE_BUFFER */) && buf && size > 0 && gm_valid(buf, 1))
+        wr8(buf, 0);
+    set_eax(c, 0);
+}
+
+
 void k_SetPriorityClass(X86 *c) {
     set_eax(c, 1); // accepted and ignored: the scheduler is cooperative
 }
@@ -5853,8 +5992,22 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "GlobalFree", 1, k_GlobalFree},
     {"KERNEL32.dll", "GlobalLock", 1, k_GlobalLock},
     {"KERNEL32.dll", "GlobalUnlock", 1, k_GlobalUnlock},
+    {"KERNEL32.dll", "GlobalHandle", 1, k_GlobalHandle},
+    {"KERNEL32.dll", "GlobalFlags", 1, k_GlobalFlags},
     {"KERNEL32.dll", "LocalAlloc", 2, k_LocalAlloc},
+    {"KERNEL32.dll", "LocalReAlloc", 3, k_LocalReAlloc},
     {"KERNEL32.dll", "LocalFree", 1, k_LocalFree},
+    {"KERNEL32.dll", "lstrcmpA", 2, k_lstrcmpA},
+    {"KERNEL32.dll", "lstrcpynA", 3, k_lstrcpynA},
+    {"KERNEL32.dll", "GetDiskFreeSpaceExA", 4, k_GetDiskFreeSpaceExA},
+    {"KERNEL32.dll", "GetFileTime", 4, k_GetFileTime},
+    {"KERNEL32.dll", "CreateProcessA", 10, k_CreateProcessA},
+    {"KERNEL32.dll", "GetProfileStringA", 5, k_GetProfileStringA},
+    {"KERNEL32.dll", "GetProfileIntA", 3, k_GetProfileIntA},
+    {"KERNEL32.dll", "WriteProfileStringA", 3, k_WriteProfileStringA},
+    {"KERNEL32.dll", "GlobalAddAtomA", 1, k_GlobalAddAtomA},
+    {"KERNEL32.dll", "GlobalFindAtomA", 1, k_GlobalFindAtomA},
+    {"KERNEL32.dll", "GlobalGetAtomNameA", 3, k_GlobalGetAtomNameA},
     {"KERNEL32.dll", "VirtualAlloc", 4, k_VirtualAlloc},
     {"KERNEL32.dll", "VirtualFree", 3, k_VirtualFree},
     {"KERNEL32.dll", "CreateFileMappingA", 6, k_CreateFileMappingA},
@@ -5946,6 +6099,27 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "CreateToolhelp32Snapshot", 2, k_CreateToolhelp32Snapshot},
     {"KERNEL32.dll", "Process32First", 2, k_Process32First},
     {"KERNEL32.dll", "Process32Next", 2, k_Process32Next},
+    {"KERNEL32.dll", "Module32First", 2, k_Process32First},
+    {"KERNEL32.dll", "Module32Next", 2, k_Process32Next},
+    {"KERNEL32.dll", "GetWindowsDirectoryA", 2, k_GetWindowsDirectoryA},
+    {"KERNEL32.dll", "LockFile", 5, k_LockUnlockFile},
+    {"KERNEL32.dll", "UnlockFile", 5, k_LockUnlockFile},
+    {"KERNEL32.dll", "MoveFileExA", 3, k_MoveFileA},
+    {"KERNEL32.dll", "ConvertDefaultLocale", 1, k_ConvertDefaultLocale},
+    {"KERNEL32.dll", "GetPrivateProfileIntA", 4, k_GetPrivateProfileIntA},
+    {"KERNEL32.dll", "GetPrivateProfileStringA", 6, k_GetPrivateProfileStringA},
+    {"KERNEL32.dll", "WritePrivateProfileStringA", 4, k_WriteProfileStringA},
+    {"KERNEL32.dll", "WriteProfileSectionA", 2, k_LockUnlockFile},
+    {"KERNEL32.dll", "FormatMessageA", 7, k_FormatMessageA},
+    {"KERNEL32.dll", "EnumResourceLanguagesA", 5, nullptr},
+    {"KERNEL32.dll", "OpenFile", 3, nullptr},
+    {"KERNEL32.dll", "AllocConsole", 0, nullptr},
+    {"KERNEL32.dll", "FreeConsole", 0, nullptr},
+    {"KERNEL32.dll", "GetConsoleMode", 2, nullptr},
+    {"KERNEL32.dll", "SetConsoleCP", 1, nullptr},
+    {"KERNEL32.dll", "SetConsoleOutputCP", 1, nullptr},
+    {"KERNEL32.dll", "WriteConsoleA", 5, nullptr},
+    {"KERNEL32.dll", "WriteConsoleW", 5, nullptr},
     {"KERNEL32.dll", "GetPriorityClass", 1, k_GetPriorityClass},
     {"KERNEL32.dll", "SetPriorityClass", 2, k_SetPriorityClass},
     {"KERNEL32.dll", "GetProcessAffinityMask", 3, k_GetProcessAffinityMask},
