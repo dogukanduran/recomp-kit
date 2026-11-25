@@ -538,6 +538,8 @@ uint32_t guest_current_thread_id();
 bool guest_thread_exists(uint32_t id);
 bool host_cursor_visible();
 bool host_cursor_clip(int32_t out[4]);
+bool host_cursor_warp_active();
+void host_get_cursor_pos(int32_t *x, int32_t *y);
 
 // Calls the window's WNDPROC through recomp_call.
 uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t wparam,

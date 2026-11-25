@@ -3,7 +3,7 @@
 set(POP_RUNTIME_SOURCES
   memory.cpp loader.cpp imports.cpp imports_cs.cpp cpu.cpp thunks.cpp seh.cpp msvc_eh.cpp crt_core.cpp crt_strings.cpp crt_math.cpp crt_stdio.cpp crt_startup.cpp crt_cpp.cpp profile.cpp kernel32.cpp kernel32_wide.cpp
   resources.cpp oleaut32.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp
-  misc.cpp misc_dlls.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
+  misc.cpp misc_dlls.cpp wsock.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
   media_foundation.cpp layout.cpp interp.cpp discovery.cpp wa_coro.cpp)
 
 # The faces the runtime's GDI draws Windows' own UI fonts with

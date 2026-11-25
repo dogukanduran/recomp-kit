@@ -296,6 +296,7 @@ if(TARGET recomp_gen)
     configure_file(${POP_ROOT}/web/player/player.js ${POP_OUT}/player.js @ONLY)
     configure_file(${POP_ROOT}/web/player/style.css ${POP_OUT}/style.css COPYONLY)
     configure_file(${POP_ROOT}/web/player/env.mjs ${POP_OUT}/env.mjs COPYONLY)
+    configure_file(${POP_ROOT}/web/player/net-relay.mjs ${POP_OUT}/net-relay.mjs COPYONLY)
     configure_file(${POP_ROOT}/web/player/audio-worklet.js ${POP_OUT}/audio-worklet.js COPYONLY)
     configure_file(${POP_ROOT}/web/player/source.mjs ${POP_OUT}/source.mjs COPYONLY)
     configure_file(${POP_ROOT}/web/player/FETCH-NOTICE.txt ${POP_OUT}/FETCH-NOTICE.txt COPYONLY)
@@ -310,7 +311,7 @@ if(TARGET recomp_gen)
       -sINITIAL_MEMORY=536870912 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4294967296
       -sSTACK_SIZE=8388608 -sDEFAULT_PTHREAD_STACK_SIZE=16777216
       -sENVIRONMENT=web,worker -sEXIT_RUNTIME=0 -sINVOKE_RUN=0
-      -sEXPORTED_RUNTIME_METHODS=ENV,callMain,FS
+      -sEXPORTED_RUNTIME_METHODS=ENV,callMain,FS,HEAPU8
       --js-library ${POP_ROOT}/web/player/fetch-backend.js
       # SHELL: keeps the flag with its file; CMake removes repeated options.
       "SHELL:--js-library ${POP_WEBGPU_JS}"

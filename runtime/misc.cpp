@@ -2522,17 +2522,6 @@ static void shlw_ColorRGBToHLS(X86 *c) {
 // GOG edition official steam_api.dll shim (SteamAPI_Init -> 1, RestartAppIfNecessary -> 0)
 static void steam_ret0(X86 *c) { set_eax(c, 0); }
 static void steam_ret1(X86 *c) { set_eax(c, 1); }
-static void ws_ret_neg1(X86 *c) { set_eax(c, 0xffffffffu); }
-static void ws_htonl(X86 *c) {
-    uint32_t v = arg(c, 0);
-    set_eax(c, ((v & 0xffu) << 24) | ((v & 0xff00u) << 8) | ((v >> 8) & 0xff00u) | ((v >> 24) & 0xffu));
-}
-static void ws_htons(X86 *c) {
-    uint32_t v = arg(c, 0) & 0xffffu;
-    set_eax(c, ((v & 0xffu) << 8) | ((v >> 8) & 0xffu));
-}
-static void ws_last_err(X86 *c) { set_eax(c, 10035u); } // WSAEWOULDBLOCK
-
 const ImportShim g_misc_shims[] = {
     // SHLWAPI
     {"SHLWAPI.dll", "PathFindFileNameA", 1, shlw_PathFindFileNameA},
@@ -2616,42 +2605,7 @@ const ImportShim g_misc_shims[] = {
     {"IMM32.dll", "ImmGetCompositionStringA", 4, i_ImmGetCompositionStringA},
     {"IMM32.dll", "ImmGetCandidateListA", 4, i_ImmGetCandidateListA},
     {"IMM32.dll", "ImmSetCompositionWindow", 2, i_ImmSetCompositionWindow},
-    // WSOCK32. D3DPopTB.exe imports these five by ordinal, so each shim is
-    // registered under both the ordinal the IAT uses and the documented name
-    // (which is what GetProcAddress would ask for).
-    {"WSOCK32.dll", "WSAStartup", 2, w_WSAStartup},
-    {"WSOCK32.dll", "ord115", 2, w_WSAStartup},
-    {"WSOCK32.dll", "WSACleanup", 0, w_WSACleanup},
-    {"WSOCK32.dll", "ord116", 0, w_WSACleanup},
-    {"WSOCK32.dll", "gethostname", 2, w_gethostname},
-    {"WSOCK32.dll", "ord57", 2, w_gethostname},
-    {"WSOCK32.dll", "gethostbyname", 1, w_gethostbyname},
-    {"WSOCK32.dll", "ord52", 1, w_gethostbyname},
-    {"WSOCK32.dll", "inet_ntoa", 1, w_inet_ntoa},
-    {"WSOCK32.dll", "ord11", 1, w_inet_ntoa},
-    {"WSOCK32.dll", "ord2", 3, ws_ret_neg1},   // bind
-    {"WSOCK32.dll", "ord3", 1, steam_ret0},    // closesocket
-    {"WSOCK32.dll", "ord4", 3, ws_ret_neg1},   // connect
-    {"WSOCK32.dll", "ord5", 3, ws_ret_neg1},   // getpeername
-    {"WSOCK32.dll", "ord6", 3, ws_ret_neg1},   // getsockname
-    {"WSOCK32.dll", "ord8", 1, ws_htonl},      // htonl
-    {"WSOCK32.dll", "ord9", 1, ws_htons},      // htons
-    {"WSOCK32.dll", "ord10", 1, ws_ret_neg1},  // inet_addr
-    {"WSOCK32.dll", "ord12", 3, steam_ret0},   // ioctlsocket
-    {"WSOCK32.dll", "ord13", 2, ws_ret_neg1},  // listen
-    {"WSOCK32.dll", "ord14", 1, ws_htonl},     // ntohl
-    {"WSOCK32.dll", "ord15", 1, ws_htons},     // ntohs
-    {"WSOCK32.dll", "ord16", 4, ws_ret_neg1},  // recv
-    {"WSOCK32.dll", "ord17", 6, ws_ret_neg1},  // recvfrom
-    {"WSOCK32.dll", "ord18", 5, steam_ret0},   // select
-    {"WSOCK32.dll", "ord19", 4, ws_ret_neg1},  // send
-    {"WSOCK32.dll", "ord20", 6, ws_ret_neg1},  // sendto
-    {"WSOCK32.dll", "ord21", 5, steam_ret0},   // setsockopt
-    {"WSOCK32.dll", "ord22", 2, steam_ret0},   // shutdown
-    {"WSOCK32.dll", "ord23", 3, ws_ret_neg1},  // socket
-    {"WSOCK32.dll", "ord101", 4, steam_ret0},  // WSAAsyncSelect
-    {"WSOCK32.dll", "ord111", 0, ws_last_err}, // WSAGetLastError
-    {"WSOCK32.dll", "ord112", 1, steam_ret0},  // WSASetLastError
+    // WSOCK32 / WS2_32 are registered by wsock_register() (wsock.cpp).
     // WINMM: implemented
     {"WINMM.dll", "timeGetTime", 0, m_timeGetTime},
     {"WINMM.dll", "timeGetDevCaps", 2, m_timeGetDevCaps},
@@ -2754,63 +2708,7 @@ const ImportShim g_misc_shims[] = {
     {"WINMM.dll", "waveInStop", 1, nullptr},
     {"WINMM.dll", "waveInReset", 1, nullptr},
     {"WINMM.dll", "waveInGetPosition", 3, nullptr},
-    // Winsock 2: present, with the network down (see s_socket_error). Like
-    // WSOCK32 above, each export is listed under its name and, where speed.exe
-    // imports it that way, under the WS2_32 ordinal its IAT uses.
-    {"WS2_32.dll", "WSAStartup", 2, w_WSAStartup},
-    {"WS2_32.dll", "ord115", 2, w_WSAStartup},
-    {"WS2_32.dll", "WSACleanup", 0, w_WSACleanup},
-    {"WS2_32.dll", "ord116", 0, w_WSACleanup},
-    {"WS2_32.dll", "WSAGetLastError", 0, s_WSAGetLastError},
-    {"WS2_32.dll", "ord111", 0, s_WSAGetLastError},
-    {"WS2_32.dll", "WSAIoctl", 9, s_socket_error},
-    {"WS2_32.dll", "WSACreateEvent", 0, s_false},
-    {"WS2_32.dll", "WSACloseEvent", 1, s_false},
-    {"WS2_32.dll", "WSASetEvent", 1, s_false},
-    {"WS2_32.dll", "WSAResetEvent", 1, s_false},
-    {"WS2_32.dll", "WSAWaitForMultipleEvents", 5, s_WSAWaitForMultipleEvents},
-    {"WS2_32.dll", "WSARecv", 7, s_socket_error},
-    {"WS2_32.dll", "WSARecvFrom", 9, s_socket_error},
-    {"WS2_32.dll", "WSAGetOverlappedResult", 5, s_false},
-    {"WS2_32.dll", "socket", 3, s_socket_down},
-    {"WS2_32.dll", "ord23", 3, s_socket_down},
-    {"WS2_32.dll", "bind", 3, s_socket_error},
-    {"WS2_32.dll", "ord2", 3, s_socket_error},
-    {"WS2_32.dll", "connect", 3, s_socket_error},
-    {"WS2_32.dll", "ord4", 3, s_socket_error},
-    {"WS2_32.dll", "listen", 2, s_socket_error},
-    {"WS2_32.dll", "ord13", 2, s_socket_error},
-    {"WS2_32.dll", "accept", 3, s_socket_down},
-    {"WS2_32.dll", "WSAAccept", 5, s_socket_down},
-    {"WS2_32.dll", "ord1", 3, s_socket_down},
-    {"WS2_32.dll", "send", 4, s_socket_error},
-    {"WS2_32.dll", "ord19", 4, s_socket_error},
-    {"WS2_32.dll", "recv", 4, s_socket_error},
-    {"WS2_32.dll", "ord16", 4, s_socket_error},
-    {"WS2_32.dll", "sendto", 6, s_socket_error},
-    {"WS2_32.dll", "ord20", 6, s_socket_error},
-    {"WS2_32.dll", "recvfrom", 6, s_socket_error},
-    {"WS2_32.dll", "ord17", 6, s_socket_error},
-    {"WS2_32.dll", "select", 5, s_socket_error},
-    {"WS2_32.dll", "ord18", 5, s_socket_error},
-    {"WS2_32.dll", "shutdown", 2, s_socket_error},
-    {"WS2_32.dll", "ord22", 2, s_socket_error},
-    {"WS2_32.dll", "closesocket", 1, s_socket_error},
-    {"WS2_32.dll", "ord3", 1, s_socket_error},
-    {"WS2_32.dll", "ioctlsocket", 3, s_socket_error},
-    {"WS2_32.dll", "ord10", 3, s_socket_error},
-    {"WS2_32.dll", "getsockopt", 5, s_socket_error},
-    {"WS2_32.dll", "ord7", 5, s_socket_error},
-    {"WS2_32.dll", "setsockopt", 5, s_socket_error},
-    {"WS2_32.dll", "ord21", 5, s_socket_error},
-    {"WS2_32.dll", "getpeername", 3, s_socket_error},
-    {"WS2_32.dll", "ord5", 3, s_socket_error},
-    {"WS2_32.dll", "getsockname", 3, s_socket_error},
-    {"WS2_32.dll", "ord6", 3, s_socket_error},
-    {"WS2_32.dll", "gethostbyname", 1, s_gethostbyname},
-    {"WS2_32.dll", "ord52", 1, s_gethostbyname},
-    {"WS2_32.dll", "gethostname", 2, w_gethostname},
-    {"WS2_32.dll", "ord57", 2, w_gethostname},
+    // WS2_32 is registered by wsock_register() (wsock.cpp).
     {"NETAPI32.dll", "Netbios", 1, s_Netbios},
     {"DDRAW.dll", "DirectDrawCreate", 3, nullptr},
     {"DDRAW.dll", "DirectDrawEnumerateA", 2, nullptr},

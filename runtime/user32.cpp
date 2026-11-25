@@ -5,6 +5,7 @@
 // (Task 7) pushes real events in with host_post_message() and the guest pulls
 // them out through PeekMessageA/GetMessageA exactly as it would on Win32.
 #include "user32_internal.h"
+#include "wsock_internal.h"
 #include "gdi_image.h"
 #include "resources.h"
 #include "win32.h"
@@ -44,6 +45,7 @@ uint32_t g_main_hwnd = 0;
 uint32_t g_cursor = 0;
 int32_t g_cursor_x = 0, g_cursor_y = 0;
 int32_t g_cursor_show = 0;
+bool g_cursor_warp_active = false;
 int32_t g_clip[4] = {0, 0, 0, 0};
 bool g_clipped = false;
 bool (*g_message_waiter)() = nullptr;
@@ -216,6 +218,15 @@ bool host_cursor_clip(int32_t *out) {
     for (int i = 0; i < 4; ++i)
         out[i] = g_clip[i];
     return true;
+}
+bool host_cursor_warp_active() {
+    return g_cursor_warp_active;
+}
+void host_get_cursor_pos(int32_t *x, int32_t *y) {
+    if (x)
+        *x = g_cursor_x;
+    if (y)
+        *y = g_cursor_y;
 }
 
 uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t wparam,
@@ -961,6 +972,7 @@ void peek_message(X86 *c) {
     }
     pump_window_timers();
     pump_mouse_input(c);
+    wsock::pump_async_select();
     if (pump)
         gdi_present_windows();
     uint32_t p = arg(c, 0), filter_hwnd = arg(c, 1);
@@ -1590,6 +1602,7 @@ void u_SetCursor(X86 *c) {
 void u_SetCursorPos(X86 *c) {
     g_cursor_x = (int32_t)arg(c, 0);
     g_cursor_y = (int32_t)arg(c, 1);
+    g_cursor_warp_active = g_clipped;
     set_eax(c, 1);
 }
 void u_GetCursorPos(X86 *c) {
@@ -1621,6 +1634,8 @@ void u_GetKeyState(X86 *c) {
 }
 void u_ShowCursor(X86 *c) {
     g_cursor_show += arg(c, 0) ? 1 : -1;
+    if (g_cursor_show >= 0)
+        g_cursor_warp_active = false;
     set_eax(c, (uint32_t)g_cursor_show);
 }
 
@@ -1630,6 +1645,7 @@ void u_ClipCursor(X86 *c) {
     uint32_t r = arg(c, 0);
     if (!r) {
         g_clipped = false;
+        g_cursor_warp_active = false;
         set_eax(c, 1);
         return;
     }

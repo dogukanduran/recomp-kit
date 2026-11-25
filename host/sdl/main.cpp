@@ -466,6 +466,16 @@ void update_platform_pointer_capture() {
 #ifdef __EMSCRIPTEN__
     // Browser canvas events deliver window-relative coordinates directly;
     // SDL_GetGlobalMouseState / SDL_SetWindowMouseRect are not supported.
+    // Use Pointer Lock (relative mouse mode) when the guest hides the cursor
+    // so relative movement isn't clamped at the canvas edges.
+    MAIN_THREAD_EM_ASM({
+        window._recompWantPointerLock = !!$0;
+        if (!$0 && document.pointerLockElement === Module.canvas && document.exitPointerLock) {
+            document.exitPointerLock();
+        }
+    }, hide_cursor ? 1 : 0);
+    if (g_window && SDL_GetWindowRelativeMouseMode(g_window) != hide_cursor)
+        SDL_SetWindowRelativeMouseMode(g_window, hide_cursor);
     HostRect rect{};
 #else
     HostRect rect = host_pointer_confinement_wanted(hide_cursor, g_window_mode) && g_window
@@ -500,6 +510,33 @@ void drain_input() {
 }
 
 void apply_motion(int32_t x, int32_t y, double drawable_dx, double drawable_dy) {
+    if (host_cursor_warp_active() && !mods_page_visible() && !mods_controls_editing()) {
+        int32_t gdx = 0, gdy = 0;
+        if (g_window && SDL_GetWindowRelativeMouseMode(g_window)) {
+            static double rem_x = 0, rem_y = 0;
+            const double vx = drawable_dx + rem_x;
+            const double vy = drawable_dy + rem_y;
+            gdx = (int32_t)std::trunc(vx);
+            gdy = (int32_t)std::trunc(vy);
+            rem_x = vx - gdx;
+            rem_y = vy - gdy;
+        } else {
+            auto hit = host_gate_window_pointer(x, y, &gdx, &gdy);
+            if (hit.kind == HitResult::HIT_NONE)
+                return;
+        }
+        if (gdx == 0 && gdy == 0)
+            return;
+        int32_t cur_x = 0, cur_y = 0;
+        host_get_cursor_pos(&cur_x, &cur_y);
+        const int32_t nx = cur_x + gdx;
+        const int32_t ny = cur_y + gdy;
+        g_cursor_x = nx;
+        g_cursor_y = ny;
+        host_input_motion(nx, ny, gdx, gdy);
+        post(WM_MOUSEMOVE_, mouse_wparam(), make_lparam(nx, ny));
+        return;
+    }
     HitResult hit;
     const bool delivered = host_gate_window_motion(x, y, drawable_dx, drawable_dy, &hit);
     static const bool trace = recomp_env("TRACE_POINTER") != nullptr;
@@ -611,6 +648,8 @@ void handle_mouse_move(const SDL_MouseMotionEvent &motion) {
     const double strip = game.whole ? strip_top : std::max(0.0, strip_top - game.y);
     const float y = (float)strip_latch.apply(motion.y, strip);
     view_point_to_drawable(motion.x, y, &e.x, &e.y, &e.drawable_w, &e.drawable_h);
+    e.dx = motion.xrel;
+    e.dy = motion.yrel;
     static const bool trace = recomp_env("TRACE_POINTER") != nullptr;
     static double last_trace = 0;
     const double now = (double(os_monotonic_ns()) / 1e9);
@@ -650,8 +689,12 @@ void apply_button(int button, bool down, int32_t x, int32_t y, bool inside, bool
         host_pointer_can_capture(pointer_capture_wanted(), inside, down, g_escape_held,
                                  mods_page_visible() || mods_controls_editing()))
         apply_pointer_capture(true);
-    x = hit.gx;
-    y = hit.gy;
+    if (host_cursor_warp_active() && !mods_page_visible() && !mods_controls_editing()) {
+        host_get_cursor_pos(&x, &y);
+    } else {
+        x = hit.gx;
+        y = hit.gy;
+    }
     if (!down && !(g_buttons & ~(1u << button)))
         host_gate_end_drag();
     static const bool trace_buttons = recomp_env("TRACE_POINTER") != nullptr;
@@ -663,11 +706,13 @@ void apply_button(int button, bool down, int32_t x, int32_t y, bool inside, bool
         return;
     if (down)
         host_gate_begin_drag(&hit);
-    g_cursor_x = x;
-    g_cursor_y = y;
-    // Absolute placement alone does not move Populous's integrated cursor.
-    host_input_motion(x, y, dx, dy);
-    post(WM_MOUSEMOVE_, mouse_wparam(), make_lparam(x, y));
+    if (!host_cursor_warp_active() || mods_page_visible() || mods_controls_editing()) {
+        g_cursor_x = x;
+        g_cursor_y = y;
+        // Absolute placement alone does not move Populous's integrated cursor.
+        host_input_motion(x, y, dx, dy);
+        post(WM_MOUSEMOVE_, mouse_wparam(), make_lparam(x, y));
+    }
     if (down)
         g_buttons |= (uint8_t)(1u << button);
     else
@@ -1565,6 +1610,12 @@ void pump() {
     // and a mod callback dispatched from here is serialised against every
     // other guest thread, which is the whole point.
     deliver_pending_input();
+    static bool last_cursor_visible = true;
+    const bool cursor_visible = host_cursor_visible();
+    if (cursor_visible != last_cursor_visible) {
+        last_cursor_visible = cursor_visible;
+        update_platform_pointer_capture();
+    }
     apply_window_mode();
     apply_mode_change();
     service(0.0);

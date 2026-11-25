@@ -1,5 +1,6 @@
 import { queryEnvironment, executablePath } from "./env.mjs?v=__RECOMP_BUILD__";
 import { selectSource } from "./source.mjs?v=__RECOMP_BUILD__";
+import { initNetRelay } from "./net-relay.mjs?v=__RECOMP_BUILD__";
 "use strict";
 const statusEl = document.getElementById("status");
 const canvas = document.getElementById("canvas");
@@ -113,7 +114,14 @@ async function start() {
     onRuntimeInitialized() {
       status("");
       setupFullscreenBanner();
+      canvas.addEventListener("pointerdown", () => {
+        if (window._recompWantPointerLock && document.pointerLockElement !== canvas &&
+            canvas.requestPointerLock) {
+          Promise.resolve(canvas.requestPointerLock()).catch(() => {});
+        }
+      });
       canvas.focus();
+      initNetRelay(Module);
       Module.callMain(source.args);
     },
   };

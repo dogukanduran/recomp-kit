@@ -29,6 +29,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import game_config  # noqa: E402
+import net_relay  # noqa: E402
 import stream_assets  # noqa: E402
 
 PAGE_FILES = ("index.html", "style.css", "app.js", "core.js", "worker.js")
@@ -142,6 +143,12 @@ class IsolatedHandler(http.server.SimpleHTTPRequestHandler):
         if is_stream_data(self.path):
             return "application/octet-stream"
         return super().guess_type(path)
+
+    def do_GET(self):
+        if self.path.split("?", 1)[0] == "/net" and self.headers.get("Upgrade", "").lower() == "websocket":
+            net_relay.handle_websocket(self)
+            return
+        super().do_GET()
 
     def send_head(self):
         """Serve one byte range; HEAD always describes the complete file."""

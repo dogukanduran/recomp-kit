@@ -53,7 +53,9 @@ void coro_worker_main(std::shared_ptr<WaCoro> co, uint32_t run_fn) {
         co->cv.wait(lk, [&] { return co->turn == WaCoro::WORKER; });
     }
 
+    LOGW("wa_coro: start coro=%08x fn=%08x", co->coro_addr, run_fn);
     recomp_call(&co->worker_cpu, run_fn);
+    LOGW("wa_coro: exit coro=%08x fn=%08x", co->coro_addr, run_fn);
 
     wr32(co->coro_addr + 0xb8u, 0u);
     wr32(co->coro_addr + 0x34u, 2u);
@@ -102,8 +104,8 @@ void hook_coro_resume(X86 *c, uint32_t /*index*/) {
                 old->th.detach();
         }
 
-        uint32_t pages = rd32(coro + 0xc4u);
-        uint32_t stack_bytes = std::max(pages * 0x2000u, 0x20000u);
+        uint32_t req_bytes = rd32(coro + 0xc4u);
+        uint32_t stack_bytes = std::max(req_bytes, 0x20000u);
         uint32_t teb_bytes = 0x100u;
         uint32_t alloc = heap_alloc(stack_bytes + teb_bytes);
         if (!alloc) {
