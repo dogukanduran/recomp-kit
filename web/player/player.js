@@ -1,5 +1,4 @@
 import { queryEnvironment, executablePath } from "./env.mjs?v=__RECOMP_BUILD__";
-import { selectSource } from "./source.mjs?v=__RECOMP_BUILD__";
 import { initNetRelay } from "./net-relay.mjs?v=__RECOMP_BUILD__";
 "use strict";
 const statusEl = document.getElementById("status");
@@ -52,11 +51,9 @@ async function start() {
     await dir.getFileHandle(file);
     imported = (await (await dirForStamp(id)).text()).trim() === game.sha256;
   } catch {}
-  const source = await selectSource(game, gamesUrl, location.search, imported);
+  if (!imported) throw new Error(`${game.title} has not been imported yet.`);
+  const source = { kind: "import", args: [`--exe=/opfs/${id}/game/${executablePath(game)}`] };
   window.recompSource = source.kind;
-  // Streamed data is kept in this origin's storage; ask the browser not to
-  // evict it under storage pressure, as it would the cache of a normal page.
-  if (source.kind === "stream" && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("WebGPU gave no adapter.");
@@ -136,34 +133,6 @@ async function dirForStamp(id) {
   const root = await navigator.storage.getDirectory();
   const game = await (await root.getDirectoryHandle(id)).getDirectoryHandle("game");
   return (await game.getFileHandle(".stamp")).getFile();
-}
-
-// A streamed game keeps what it downloads in this browser and fills in the
-// rest in the background; show how much is local until all of it is.
-if (typeof BroadcastChannel === "function") {
-  const streamEl = document.getElementById("stream");
-  let saved = "", downloading = false;
-  new BroadcastChannel("recomp-stream").onmessage = ({ data }) => {
-    if (!data) return;
-    if ("waiting" in data) {
-      downloading = data.waiting;
-      if (downloading) {
-        streamEl.hidden = false;
-        streamEl.textContent = `Downloading game data… ${(data.rate / 1e6).toFixed(1)} MB/s`;
-      } else {
-        streamEl.hidden = !saved;
-        streamEl.textContent = saved;
-      }
-      return;
-    }
-    if (!data.total) return;
-    saved = data.cached && data.filled < data.total
-      ? `Saving game data to this browser: ${Math.floor(100 * data.filled / data.total)}%` : "";
-    if (!downloading) {
-      streamEl.hidden = !saved;
-      streamEl.textContent = saved;
-    }
-  };
 }
 
 function setupFullscreenBanner() {

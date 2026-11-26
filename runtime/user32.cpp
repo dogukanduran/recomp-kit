@@ -11,6 +11,7 @@
 #include "win32.h"
 #include "../platform/os.h"
 #include "memory.h"
+#include "packed_asset.h"
 
 #include <array>
 #include <deque>
@@ -1571,6 +1572,12 @@ void u_GetUpdateRect(X86 *c) {
 void u_LoadCursorFromFileW(X86 *c) {
     set_eax(c, arg(c, 0) && gm_valid(arg(c, 0), 2) ? g_next_icon++ : 0);
 }
+static uint32_t g_cursor_version = 0;
+static GdiImage g_cursor_image;
+static std::map<uint32_t, std::pair<int32_t, int32_t>> &icon_hotspots() {
+    static std::map<uint32_t, std::pair<int32_t, int32_t>> m;
+    return m;
+}
 void u_CreateIconIndirect(X86 *c) {
     uint32_t info = arg(c, 0);
     GdiImage image, mask;
@@ -1580,29 +1587,59 @@ void u_CreateIconIndirect(X86 *c) {
             for (int32_t y = 0; y < image.height; ++y)
                 for (int32_t x = 0; x < image.width; ++x)
                     if (mask.pixels[size_t(y) * mask.width + x] & 0xffffff)
-                        image.pixels[size_t(y) * image.width + x] = 0;
+                        image.pixels[size_t(y) * mask.width + x] = 0;
         }
-        set_eax(c, gdi_create_icon(image));
+        uint32_t h = gdi_create_icon(image);
+        if (h)
+            icon_hotspots()[h] = {int32_t(rd32(info + 4)), int32_t(rd32(info + 8))};
+        set_eax(c, h);
         return;
     }
     set_eax(c, arg(c, 0) ? g_next_icon++ : 0);
 }
 void u_DestroyIcon(X86 *c) {
-    gdi_delete_icon(arg(c, 0));
-    set_eax(c, arg(c, 0) ? 1 : 0);
+    uint32_t h = arg(c, 0);
+    icon_hotspots().erase(h);
+    gdi_delete_icon(h);
+    set_eax(c, h ? 1 : 0);
 }
 void u_LoadIconA(X86 *c) {
     set_eax(c, 0x00029001);
 }
 void u_SetCursor(X86 *c) {
     uint32_t prev = g_cursor;
-    g_cursor = arg(c, 0);
+    uint32_t next = arg(c, 0);
+    if (next != prev) {
+        g_cursor = next;
+        ++g_cursor_version;
+    }
     set_eax(c, prev);
+}
+bool host_cursor_image(uint32_t *out_version, int32_t *out_w, int32_t *out_h,
+                       int32_t *out_hx, int32_t *out_hy, const uint32_t **out_pixels) {
+    if (out_version) *out_version = g_cursor_version;
+    if (!g_cursor || !gdi_read_icon(g_cursor, &g_cursor_image) || g_cursor_image.pixels.empty()) {
+        if (out_w) *out_w = 0;
+        if (out_h) *out_h = 0;
+        if (out_hx) *out_hx = 0;
+        if (out_hy) *out_hy = 0;
+        if (out_pixels) *out_pixels = nullptr;
+        return false;
+    }
+    auto it = icon_hotspots().find(g_cursor);
+    int32_t hx = it != icon_hotspots().end() ? std::max(0, std::min(it->second.first, g_cursor_image.width - 1)) : 0;
+    int32_t hy = it != icon_hotspots().end() ? std::max(0, std::min(it->second.second, g_cursor_image.height - 1)) : 0;
+    if (out_w) *out_w = g_cursor_image.width;
+    if (out_h) *out_h = g_cursor_image.height;
+    if (out_hx) *out_hx = hx;
+    if (out_hy) *out_hy = hy;
+    if (out_pixels) *out_pixels = g_cursor_image.pixels.data();
+    return true;
 }
 void u_SetCursorPos(X86 *c) {
     g_cursor_x = (int32_t)arg(c, 0);
     g_cursor_y = (int32_t)arg(c, 1);
-    g_cursor_warp_active = g_clipped;
+    g_cursor_warp_active = g_clipped || !host_cursor_visible();
     set_eax(c, 1);
 }
 void u_GetCursorPos(X86 *c) {
@@ -2166,22 +2203,39 @@ void u_LoadImageA(X86 *c) {
         uint32_t temp = 0, data = 0, bytes = 0, pixel_offset = 0;
         if (flags & 0x10) { // LR_LOADFROMFILE
             std::string path = win32_host_path(gm_str(name, 260));
-            FILE *f = path.empty() ? nullptr : fopen(path.c_str(), "rb");
-            if (f) {
-                fseek(f, 0, SEEK_END);
-                long n = ftell(f);
-                rewind(f);
+            std::vector<uint8_t> packed;
+            if (!path.empty() && packed_asset_try_load(path, &packed)) {
+                size_t n = packed.size();
                 if (n >= 54 && uint64_t(n) < GUEST_SIZE) {
                     temp = heap_alloc(uint32_t(n));
-                    if (temp && fread(g_mem + temp, 1, size_t(n), f) == size_t(n) &&
-                        rd16(temp) == 0x4d42 && rd32(temp + 10) >= 54 &&
-                        rd32(temp + 10) <= uint32_t(n)) {
-                        pixel_offset = rd32(temp + 10) - 14;
-                        data = temp + 14;
-                        bytes = uint32_t(n) - 14;
+                    if (temp) {
+                        std::memcpy(g_mem + temp, packed.data(), n);
+                        if (rd16(temp) == 0x4d42 && rd32(temp + 10) >= 54 &&
+                            rd32(temp + 10) <= uint32_t(n)) {
+                            pixel_offset = rd32(temp + 10) - 14;
+                            data = temp + 14;
+                            bytes = uint32_t(n) - 14;
+                        }
                     }
                 }
-                fclose(f);
+            } else {
+                FILE *f = path.empty() ? nullptr : fopen(path.c_str(), "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long n = ftell(f);
+                    rewind(f);
+                    if (n >= 54 && uint64_t(n) < GUEST_SIZE) {
+                        temp = heap_alloc(uint32_t(n));
+                        if (temp && fread(g_mem + temp, 1, size_t(n), f) == size_t(n) &&
+                            rd16(temp) == 0x4d42 && rd32(temp + 10) >= 54 &&
+                            rd32(temp + 10) <= uint32_t(n)) {
+                            pixel_offset = rd32(temp + 10) - 14;
+                            data = temp + 14;
+                            bytes = uint32_t(n) - 14;
+                        }
+                    }
+                    fclose(f);
+                }
             }
         } else {
             uint32_t entry = resource_find(2, name);

@@ -62,6 +62,25 @@ bool blit(uint32_t dst, int32_t x, int32_t y, int32_t w, int32_t h, uint32_t src
           int32_t sy, int32_t sw, int32_t sh, uint32_t rop, uint32_t mask = 0, int32_t mx = 0,
           int32_t my = 0) {
     int dw, dh, srcw, srch;
+    if (!src) {
+        if (!dc_size(dst, &dw, &dh) || !w || !h)
+            return false;
+        int64_t width = std::abs(int64_t(w)), height = std::abs(int64_t(h));
+        Rect clip = clip_box(dst);
+        int64_t left = std::max<int64_t>(clip.l, w < 0 ? int64_t(x) - width : x),
+                top = std::max<int64_t>(clip.t, h < 0 ? int64_t(y) - height : y);
+        int64_t right = std::min<int64_t>(clip.r, w < 0 ? x : int64_t(x) + width),
+                bottom = std::min<int64_t>(clip.b, h < 0 ? y : int64_t(y) + height);
+        uint32_t pat = brush(dst);
+        unsigned index = (rop >> 16) & 255;
+        for (int64_t yy = top; yy < bottom; ++yy)
+            for (int64_t xx = left; xx < right; ++xx) {
+                uint32_t old;
+                if (read_pixel(dst, xx, yy, &old))
+                    write_pixel(dst, xx, yy, raster(index, pat, 0, old));
+            }
+        return true;
+    }
     if (!dc_size(dst, &dw, &dh) || !dc_size(src, &srcw, &srch) || !w || !h || !sw || !sh)
         return false;
     int64_t width = std::abs(int64_t(w)), height = std::abs(int64_t(h));

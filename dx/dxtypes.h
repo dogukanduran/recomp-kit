@@ -584,12 +584,12 @@ static const uint16_t WAVE_FORMAT_PCM = 1;
 // DSCAPS, 96 bytes.
 enum { DSCAPS_SIZE = 96, DSCAPS_OFF_dwSize = 0x00, DSCAPS_OFF_dwFlags = 0x04 };
 static const uint32_t DSCAPS_PRIMARY16BIT = 0x00000008u;
-static const uint32_t DSCAPS_PRIMARYSTEREO = 0x00000004u;
+static const uint32_t DSCAPS_PRIMARYSTEREO = 0x00000002u;
 static const uint32_t DSCAPS_CONTINUOUSRATE = 0x00000010u;
 static const uint32_t DSCAPS_EMULDRIVER = 0x00000020u;
 static const uint32_t DSCAPS_CERTIFIED = 0x00000040u;
 static const uint32_t DSCAPS_SECONDARY16BIT = 0x00000800u;
-static const uint32_t DSCAPS_SECONDARYSTEREO = 0x00000400u;
+static const uint32_t DSCAPS_SECONDARYSTEREO = 0x00000200u;
 
 // DSBCAPS (the query structure), 20 bytes.
 enum { DSBCAPS_SIZE = 20 };

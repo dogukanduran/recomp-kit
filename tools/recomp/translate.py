@@ -2003,11 +2003,26 @@ def seh_frame_sites(fn, image=None):
             # three PUSHes. Prove that spelling locally; an arbitrary FS
             # register operand can address a different TEB field.
             zero_base = dst.base if seh_zero_base(fn, i, dst.base) else 0
+            push_op = parse_operand(push.ops[0])
+            direct_push = seh_chain_operand(push_op, zero_base)
+            reg_push = False
+            search_from = i - 2
+            if (not direct_push and i >= 3 and push_op.kind == "reg" and push_op.size == 32
+                    and fn.contiguous[i - 2]):
+                load_fs = fn.insns[i - 2]
+                if load_fs.mnem == "MOV" and len(load_fs.ops) == 2:
+                    ld_dst, ld_src = [parse_operand(o) for o in load_fs.ops]
+                    if (ld_dst.kind == "reg" and ld_dst.reg == push_op.reg and ld_dst.size == 32
+                            and ld_src.kind == "mem" and ld_src.size in (None, 32)
+                            and ld_src.seg == "FS" and ld_src.base in (None, zero_base)
+                            and ld_src.index is None and ld_src.disp == 0):
+                        reg_push = True
+                        search_from = i - 3
             if (not seh_chain_operand(dst, zero_base) or src.kind != "reg" or src.reg != 4
-                    or src.size != 32 or not seh_chain_operand(parse_operand(push.ops[0]), zero_base)
+                    or src.size != 32 or (not direct_push and not reg_push)
                     or not fn.contiguous[i - 1]):
                 continue
-            for j in range(i - 2, max(-1, i - 4), -1):
+            for j in range(search_from, max(-1, search_from - 3), -1):
                 prev = fn.insns[j]
                 if not fn.contiguous[j]:
                     break

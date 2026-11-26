@@ -213,7 +213,7 @@ if(TARGET recomp_gen)
   if(NOT IOS AND NOT ANDROID)
   pop_host(pop_headless GEN
     SOURCES ${HOST}/headless_main.cpp ${HOST}/page_overlay.cpp ${POP_AUDIO_SOURCES}
-    LIBS ${POP_CORE_LIBS}
+    LIBS ${POP_CORE_LIBS} recomp_miniz
     FRAMEWORKS ${FW_FOUNDATION})
   pop_link_sdl(pop_headless)
   if(TARGET core_mods)
@@ -224,7 +224,7 @@ if(TARGET recomp_gen)
     SOURCES ${HOST}/smoke_main.cpp ${HOST}/script.cpp ${HOST}/input.cpp ${HOST}/input_gate.cpp
             ${HOST}/input_touch.cpp ${HOST}/controls/vpad_host_api.cpp ${HOST}/sdl/keymap.cpp
             ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/audio_math.cpp
-    LIBS ${POP_CORE_LIBS}
+    LIBS ${POP_CORE_LIBS} recomp_miniz
     FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
   pop_link_sdl(pop_smoke)
   if(EMSCRIPTEN)
@@ -258,7 +258,7 @@ if(TARGET recomp_gen)
             ${HOST}/page_overlay.cpp
             ${POP_PRESENT_SOURCES}
             ${HOST}/input.cpp ${HOST}/input_gate.cpp ${HOST}/input_touch.cpp ${POP_AUDIO_SOURCES}
-    LIBS ${POP_CORE_LIBS}
+    LIBS ${POP_CORE_LIBS} recomp_miniz
     FRAMEWORKS ${FW_METAL})
   pop_link_sdl(recomp_app)
   set_target_properties(recomp_app PROPERTIES OUTPUT_NAME ${RECOMP_APP_NAME})
@@ -298,7 +298,6 @@ if(TARGET recomp_gen)
     configure_file(${POP_ROOT}/web/player/env.mjs ${POP_OUT}/env.mjs COPYONLY)
     configure_file(${POP_ROOT}/web/player/net-relay.mjs ${POP_OUT}/net-relay.mjs COPYONLY)
     configure_file(${POP_ROOT}/web/player/audio-worklet.js ${POP_OUT}/audio-worklet.js COPYONLY)
-    configure_file(${POP_ROOT}/web/player/source.mjs ${POP_OUT}/source.mjs COPYONLY)
     configure_file(${POP_ROOT}/web/player/FETCH-NOTICE.txt ${POP_OUT}/FETCH-NOTICE.txt COPYONLY)
     target_link_options(recomp_app PRIVATE
       # Emscripten's Wasm/JS optimization happens at link time too; the

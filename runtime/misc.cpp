@@ -8,6 +8,7 @@
 #include "memory.h"
 #include "win32.h"
 #include "loader.h"
+#include "packed_asset.h"
 #include "resources.h"
 #include <algorithm>
 
@@ -1495,7 +1496,31 @@ struct MmioFile {
     FILE *fp = nullptr;
     std::string path;
     bool writable = false;
+    bool mem_active = false;
+    std::vector<uint8_t> mem_buf;
+    size_t mem_pos = 0;
 };
+static size_t mmio_read_bytes(MmioFile &m, void *dst, size_t n) {
+    if (!m.mem_active) return fread(dst, 1, n, m.fp);
+    if (m.mem_pos >= m.mem_buf.size()) return 0;
+    size_t take = std::min(m.mem_buf.size() - m.mem_pos, n);
+    std::memcpy(dst, m.mem_buf.data() + m.mem_pos, take);
+    m.mem_pos += take;
+    return take;
+}
+static int mmio_seek_pos(MmioFile &m, long off, int whence) {
+    if (!m.mem_active) return fseek(m.fp, off, whence);
+    long base = whence == SEEK_CUR ? (long)m.mem_pos
+              : whence == SEEK_END ? (long)m.mem_buf.size()
+                                   : 0;
+    long next = base + off;
+    if (next < 0) return -1;
+    m.mem_pos = (size_t)next;
+    return 0;
+}
+static long mmio_tell_pos(MmioFile &m) {
+    return m.mem_active ? (long)m.mem_pos : ftell(m.fp);
+}
 std::map<uint32_t, MmioFile> &mmios() {
     static std::map<uint32_t, MmioFile> m;
     return m;
@@ -1516,6 +1541,20 @@ void m_mmioOpenA(X86 *c) {
             wr32(pinfo + 4, 258); // MMIOINFO.wErrorRet = MMIOERR_FILENOTFOUND
         set_eax(c, 0);
         return;
+    }
+    if (!write && !readwrite && !create) {
+        std::vector<uint8_t> decoded;
+        if (packed_asset_try_load(host, &decoded)) {
+            uint32_t h = g_next_mmio;
+            g_next_mmio += 4;
+            MmioFile mf;
+            mf.path = host;
+            mf.mem_active = true;
+            mf.mem_buf = std::move(decoded);
+            mmios()[h] = std::move(mf);
+            set_eax(c, h);
+            return;
+        }
     }
     const char *mode = create      ? (readwrite ? "w+b" : "wb")
                        : readwrite ? "r+b"
@@ -1561,7 +1600,7 @@ void m_mmioRead(X86 *c) {
         set_eax(c, 0xffffffffu);
         return;
     }
-    size_t got = fread(g_mem + buf, 1, n, it->second.fp);
+    size_t got = mmio_read_bytes(it->second, g_mem + buf, n);
     set_eax(c, (uint32_t)got);
 }
 
@@ -1574,11 +1613,11 @@ void m_mmioSeek(X86 *c) {
         return;
     }
     int whence = origin == 1 ? SEEK_CUR : origin == 2 ? SEEK_END : SEEK_SET;
-    if (fseek(it->second.fp, off, whence) != 0) {
+    if (mmio_seek_pos(it->second, off, whence) != 0) {
         set_eax(c, 0xffffffffu);
         return;
     }
-    set_eax(c, (uint32_t)ftell(it->second.fp));
+    set_eax(c, (uint32_t)mmio_tell_pos(it->second));
 }
 
 void m_mmioDescend(X86 *c) {
@@ -1588,7 +1627,7 @@ void m_mmioDescend(X86 *c) {
         set_eax(c, 265); // MMIOERR_CHUNKNOTFOUND
         return;
     }
-    FILE *fp = it->second.fp;
+    MmioFile &mf = it->second;
     uint32_t want_id = rd32(pck);
     uint32_t want_form = rd32(pck + 8);
     long limit = -1;
@@ -1596,24 +1635,24 @@ void m_mmioDescend(X86 *c) {
         limit = (long)rd32(pparent + 12) + (long)rd32(pparent + 4);
     }
     for (;;) {
-        long pos = ftell(fp);
+        long pos = mmio_tell_pos(mf);
         if (limit >= 0 && pos + 8 > limit) {
             set_eax(c, 265);
             return;
         }
         uint8_t hdr[8];
-        if (fread(hdr, 1, 8, fp) != 8) {
+        if (mmio_read_bytes(mf, hdr, 8) != 8) {
             set_eax(c, 265);
             return;
         }
         uint32_t ckid = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
         uint32_t cksize = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
-        uint32_t data_off = (uint32_t)ftell(fp);
+        uint32_t data_off = (uint32_t)mmio_tell_pos(mf);
         uint32_t fcc = 0;
         bool is_container = (ckid == 0x46464952u /* RIFF */ || ckid == 0x5453494cu /* LIST */);
         if (is_container) {
             uint8_t fbuf[4];
-            if (fread(fbuf, 1, 4, fp) != 4) {
+            if (mmio_read_bytes(mf, fbuf, 4) != 4) {
                 set_eax(c, 265);
                 return;
             }
@@ -1633,7 +1672,7 @@ void m_mmioDescend(X86 *c) {
             return;
         }
         long next = (long)data_off + (long)cksize + (cksize & 1);
-        if (fseek(fp, next, SEEK_SET) != 0) {
+        if (mmio_seek_pos(mf, next, SEEK_SET) != 0) {
             set_eax(c, 265);
             return;
         }
@@ -1648,14 +1687,15 @@ void m_mmioAscend(X86 *c) {
         return;
     }
     uint32_t cksize = rd32(pck + 4), data_off = rd32(pck + 12);
-    fseek(it->second.fp, (long)data_off + (long)cksize + (cksize & 1), SEEK_SET);
+    mmio_seek_pos(it->second, (long)data_off + (long)cksize + (cksize & 1), SEEK_SET);
     set_eax(c, 0);
 }
 
 void m_mmioClose(X86 *c) {
     auto it = mmios().find(arg(c, 0));
     if (it != mmios().end()) {
-        fclose(it->second.fp);
+        if (it->second.fp)
+            fclose(it->second.fp);
         mmios().erase(it);
     }
     set_eax(c, 0);

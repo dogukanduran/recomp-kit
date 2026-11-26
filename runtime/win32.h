@@ -539,6 +539,8 @@ bool guest_thread_exists(uint32_t id);
 bool host_cursor_visible();
 bool host_cursor_clip(int32_t out[4]);
 bool host_cursor_warp_active();
+bool host_cursor_image(uint32_t *out_version, int32_t *out_w, int32_t *out_h,
+                       int32_t *out_hx, int32_t *out_hy, const uint32_t **out_pixels);
 void host_get_cursor_pos(int32_t *x, int32_t *y);
 
 // Calls the window's WNDPROC through recomp_call.

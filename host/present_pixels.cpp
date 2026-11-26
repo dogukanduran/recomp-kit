@@ -132,11 +132,21 @@ extern "C" void host_present_expand_xrgb8888(const uint8_t *src, int w, int h, i
     for (int y = 0; y < h; ++y) {
         const uint8_t *row = src + (size_t)y * (size_t)pitch;
         uint8_t *o = out + (size_t)y * (size_t)w * 4;
-        for (int x = 0; x < w; ++x) {
-            o[4 * x + 0] = row[4 * x + 2];
-            o[4 * x + 1] = row[4 * x + 1];
-            o[4 * x + 2] = row[4 * x + 0];
-            o[4 * x + 3] = 255;
+        if (((uintptr_t)row & 3u) == 0 && ((uintptr_t)o & 3u) == 0) {
+            const uint32_t *s32 = reinterpret_cast<const uint32_t *>(row);
+            uint32_t *d32 = reinterpret_cast<uint32_t *>(o);
+            for (int x = 0; x < w; ++x) {
+                uint32_t p = s32[x];
+                d32[x] = ((p & 0x00ff0000u) >> 16) | (p & 0x0000ff00u) |
+                         ((p & 0x000000ffu) << 16) | 0xff000000u;
+            }
+        } else {
+            for (int x = 0; x < w; ++x) {
+                o[4 * x + 0] = row[4 * x + 2];
+                o[4 * x + 1] = row[4 * x + 1];
+                o[4 * x + 2] = row[4 * x + 0];
+                o[4 * x + 3] = 255;
+            }
         }
     }
 }

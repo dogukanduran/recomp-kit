@@ -509,13 +509,31 @@ void drain_input() {
     deliver_pending_input();
 }
 
+static bool browser_pointer_locked() {
+#ifdef __EMSCRIPTEN__
+    return MAIN_THREAD_EM_ASM_INT({
+        return (typeof document !== 'undefined' && typeof Module !== 'undefined' &&
+                document.pointerLockElement === Module.canvas) ? 1 : 0;
+    }) != 0;
+#else
+    return true;
+#endif
+}
+
 void apply_motion(int32_t x, int32_t y, double drawable_dx, double drawable_dy) {
     if (host_cursor_warp_active() && !mods_page_visible() && !mods_controls_editing()) {
         int32_t gdx = 0, gdy = 0;
-        if (g_window && SDL_GetWindowRelativeMouseMode(g_window)) {
+        if (g_window && SDL_GetWindowRelativeMouseMode(g_window) && browser_pointer_locked()) {
+            int bw = 0, bh = 0, dw = 0, dh = 0;
+            window_sizes(&bw, &bh, &dw, &dh);
+            const HostGameRect game = game_rect_for(dw, dh);
+            uint32_t gw = 640, gh = 480, gbpp = 32;
+            win32_display_mode(&gw, &gh, &gbpp);
+            const double sx = (game.w > 0 && gw > 0) ? double(gw) / game.w : 1.0;
+            const double sy = (game.h > 0 && gh > 0) ? double(gh) / game.h : 1.0;
             static double rem_x = 0, rem_y = 0;
-            const double vx = drawable_dx + rem_x;
-            const double vy = drawable_dy + rem_y;
+            const double vx = drawable_dx * sx + rem_x;
+            const double vy = drawable_dy * sy + rem_y;
             gdx = (int32_t)std::trunc(vx);
             gdy = (int32_t)std::trunc(vy);
             rem_x = vx - gdx;
@@ -529,8 +547,20 @@ void apply_motion(int32_t x, int32_t y, double drawable_dx, double drawable_dy) 
             return;
         int32_t cur_x = 0, cur_y = 0;
         host_get_cursor_pos(&cur_x, &cur_y);
-        const int32_t nx = cur_x + gdx;
-        const int32_t ny = cur_y + gdy;
+        int32_t nx = cur_x + gdx;
+        int32_t ny = cur_y + gdy;
+        int32_t clip[4] = {};
+        if (host_cursor_clip(clip) && clip[2] > clip[0] && clip[3] > clip[1]) {
+            nx = std::clamp(nx, clip[0], clip[2] - 1);
+            ny = std::clamp(ny, clip[1], clip[3] - 1);
+        } else {
+            uint32_t gw = 640, gh = 480, gbpp = 32;
+            win32_display_mode(&gw, &gh, &gbpp);
+            if (gw > 0 && gh > 0) {
+                nx = std::clamp<int32_t>(nx, 0, int32_t(gw) - 1);
+                ny = std::clamp<int32_t>(ny, 0, int32_t(gh) - 1);
+            }
+        }
         g_cursor_x = nx;
         g_cursor_y = ny;
         host_input_motion(nx, ny, gdx, gdy);
@@ -1615,6 +1645,27 @@ void pump() {
     if (cursor_visible != last_cursor_visible) {
         last_cursor_visible = cursor_visible;
         update_platform_pointer_capture();
+    }
+    static uint32_t last_cursor_version = 0;
+    static SDL_Cursor *custom_cursor = nullptr;
+    uint32_t cur_ver = 0;
+    int32_t cw = 0, ch = 0, chx = 0, chy = 0;
+    const uint32_t *cpix = nullptr;
+    bool has_cur = host_cursor_image(&cur_ver, &cw, &ch, &chx, &chy, &cpix);
+    if (cur_ver != last_cursor_version) {
+        last_cursor_version = cur_ver;
+        SDL_Cursor *next_cur = nullptr;
+        if (has_cur && cpix && cw > 0 && ch > 0) {
+            if (SDL_Surface *surf = SDL_CreateSurfaceFrom(cw, ch, SDL_PIXELFORMAT_ARGB8888,
+                                                           const_cast<uint32_t *>(cpix), cw * 4)) {
+                next_cur = SDL_CreateColorCursor(surf, chx, chy);
+                SDL_DestroySurface(surf);
+            }
+        }
+        SDL_SetCursor(next_cur ? next_cur : SDL_GetDefaultCursor());
+        if (custom_cursor)
+            SDL_DestroyCursor(custom_cursor);
+        custom_cursor = next_cur;
     }
     apply_window_mode();
     apply_mode_change();

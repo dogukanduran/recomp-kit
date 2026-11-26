@@ -17,6 +17,7 @@
 #include "clock_spin.h"
 #include "frame_deadline.h"
 #include "memory.h"
+#include "packed_asset.h"
 #include "win32.h"
 #include "native_seam.h"
 #include "loader.h"
@@ -112,6 +113,9 @@ struct HObj {
     uint32_t references = 1;
     int fd = -1;      // H_FILE, H_MAPPING
     std::string path; // H_FILE, H_MAPPING, H_MODULE
+    bool mem_active = false;
+    std::vector<uint8_t> mem_buf;
+    mutable size_t mem_pos = 0;
     // H_FILE opened for writing on an existing file: the open went through
     // the read tier, and the write tier is resolved by the first write. See
     // file_promote_for_write.
@@ -647,6 +651,9 @@ void fill_find_data(uint32_t addr, const std::string &host_path, const std::stri
     memset(g_mem + addr, 0, wide ? 592 : 320);
     OsStat st{};
     if (os_stat(host_path.c_str(), &st) == 0) {
+        uint64_t packed_sz = 0;
+        if (packed_asset_uncompressed_size(host_path, &packed_sz))
+            st.size = packed_sz;
         wr32(addr + 0, attrs_for(st));
         put_filetime(addr + 4, st.ctime);
         put_filetime(addr + 12, st.atime);
@@ -926,6 +933,32 @@ static bool file_promote_for_write(HObj *o) {
     std::string host = win32_host_path_op(o->guest_name, WIN32_FILE_WRITE);
     if (host.empty())
         return false;
+    if (o->mem_active) {
+        int fd = os_fd_open(host.c_str(), o->write_flags | OS_O_CREAT | OS_O_TRUNC);
+        if (fd < 0)
+            return false;
+        if (!o->mem_buf.empty()) {
+            size_t off = 0;
+            while (off < o->mem_buf.size()) {
+                int64_t w = os_fd_write(fd, o->mem_buf.data() + off, o->mem_buf.size() - off);
+                if (w <= 0) {
+                    os_fd_close(fd);
+                    return false;
+                }
+                off += (size_t)w;
+            }
+        }
+        os_fd_seek(fd, (int64_t)o->mem_pos, OS_SEEK_SET);
+        o->fd = fd;
+        o->path = host;
+        o->mem_active = false;
+        std::vector<uint8_t>().swap(o->mem_buf);
+        o->mem_pos = 0;
+        o->write_pending = false;
+        win32_invalidate_dir_cache();
+        LOGV("CreateFileA(%s): first write (from packed), now %s", o->guest_name.c_str(), host.c_str());
+        return true;
+    }
     int64_t pos = os_fd_seek(o->fd, 0, OS_SEEK_CUR);
     int fd = os_fd_open(host.c_str(), o->write_flags | OS_O_CREAT);
     if (fd < 0)
@@ -1036,6 +1069,22 @@ void k_SetFilePointer(X86 *c) {
     if (phigh)
         off |= ((int64_t)(int32_t)rd32(phigh)) << 32;
     int whence = method == 1 ? OS_SEEK_CUR : method == 2 ? OS_SEEK_END : OS_SEEK_SET;
+    if (o->mem_active) {
+        int64_t base = whence == OS_SEEK_CUR ? (int64_t)o->mem_pos
+                     : whence == OS_SEEK_END ? (int64_t)o->mem_buf.size()
+                                             : 0;
+        int64_t next = base + off;
+        if (next < 0) {
+            set_last_error(ERROR_ACCESS_DENIED_);
+            set_eax(c, INVALID_HANDLE_VALUE_);
+            return;
+        }
+        o->mem_pos = (size_t)next;
+        if (phigh)
+            wr32(phigh, (uint32_t)((uint64_t)next >> 32));
+        set_eax(c, (uint32_t)next);
+        return;
+    }
     int64_t pos = os_fd_seek(o->fd, off, whence);
     if (pos < 0) {
         set_last_error(ERROR_ACCESS_DENIED_);
@@ -1053,6 +1102,13 @@ void k_GetFileSize(X86 *c) {
     if (!o) {
         set_last_error(ERROR_INVALID_HANDLE_);
         set_eax(c, INVALID_HANDLE_VALUE_);
+        return;
+    }
+    if (o->mem_active) {
+        uint64_t sz = o->mem_buf.size();
+        if (phigh)
+            wr32(phigh, (uint32_t)(sz >> 32));
+        set_eax(c, (uint32_t)sz);
         return;
     }
     OsStat st{};
@@ -1508,10 +1564,16 @@ void k_MapViewOfFile(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    os_fd_seek(m->fd, off_low, OS_SEEK_SET);
-    int64_t got = os_fd_read(m->fd, g_mem + addr, n);
-    if (got < 0)
-        got = 0;
+    if (m->mem_active) {
+        size_t avail = off_low < m->mem_buf.size() ? m->mem_buf.size() - off_low : 0;
+        size_t take = std::min<size_t>(avail, n);
+        if (take > 0)
+            std::memcpy(g_mem + addr, m->mem_buf.data() + off_low, take);
+    } else {
+        os_fd_seek(m->fd, off_low, OS_SEEK_SET);
+        int64_t got = os_fd_read(m->fd, g_mem + addr, n);
+        (void)got;
+    }
     m->map_view = addr;
     LOGV("MapViewOfFile(%s, %u bytes) -> %08x", m->path.c_str(), n, addr);
     set_eax(c, addr);
@@ -3390,6 +3452,15 @@ void *file_read_worker(void *) {
 }
 
 int64_t file_read_on(const HObj *o, uint8_t *dst, uint32_t n) {
+    if (o->mem_active) {
+        if (o->mem_pos >= o->mem_buf.size())
+            return 0;
+        size_t avail = o->mem_buf.size() - o->mem_pos;
+        size_t take = std::min<size_t>(avail, n);
+        std::memcpy(dst, o->mem_buf.data() + o->mem_pos, take);
+        o->mem_pos += take;
+        return (int64_t)take;
+    }
     const int fd = o->fd;
     static const bool may_block = os_fd_reads_may_block() != 0;
     // Only a guest thread with company and outside an atomic stretch may wait.
@@ -5259,6 +5330,16 @@ void create_file_named(X86 *c, const std::string &name) {
     uint32_t h = handle_new(H_FILE);
     handles()[h].fd = fd;
     handles()[h].path = host;
+    if (disp != 2 && disp != 5) {
+        std::vector<uint8_t> decoded;
+        if (packed_asset_try_load(host, &decoded)) {
+            os_fd_close(fd);
+            handles()[h].fd = -1;
+            handles()[h].mem_active = true;
+            handles()[h].mem_buf = std::move(decoded);
+            handles()[h].mem_pos = 0;
+        }
+    }
     if (deferred) {
         handles()[h].write_pending = true;
         handles()[h].write_flags = wanted;
@@ -5280,6 +5361,9 @@ void get_file_attributes_named(X86 *c, const std::string &name) {
         set_eax(c, 0xffffffffu);
         return;
     }
+    uint64_t packed_sz = 0;
+    if (packed_asset_uncompressed_size(host, &packed_sz))
+        st.size = packed_sz;
     if (recomp_env("TRACE_FILES"))
         LOGW("file: attrs \"%s\" -> ok size=%lld", name.c_str(), (long long)st.size);
     set_eax(c, attrs_for(st));
@@ -5591,6 +5675,19 @@ void create_mapping_named(X86 *c, const std::string &name) {
     if (!f) {
         set_last_error(ERROR_INVALID_HANDLE_);
         set_eax(c, 0);
+        return;
+    }
+    if (f->mem_active) {
+        if (!size)
+            size = (uint32_t)f->mem_buf.size();
+        uint32_t h = handle_new(H_MAPPING);
+        handles()[h].mem_active = true;
+        handles()[h].mem_buf = f->mem_buf;
+        handles()[h].map_size = size;
+        handles()[h].path = f->path;
+        handles()[h].object_name = name;
+        set_last_error(ERROR_SUCCESS_);
+        set_eax(c, h);
         return;
     }
     OsStat st{};

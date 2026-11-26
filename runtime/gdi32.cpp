@@ -1826,7 +1826,7 @@ uint32_t own_dib(Dib d, uint32_t bits_out = 0) {
 void create_section(X86 *c) {
     Dib d;
     uint32_t out = arg(c, 3);
-    if (arg(c, 4) || arg(c, 5) || !out || !gm_valid(out, 4) ||
+    if (arg(c, 4) || arg(c, 5) || (out && !gm_valid(out, 4)) ||
         !describe_dib(arg(c, 1), arg(c, 2), arg(c, 0), &d)) {
         set_eax(c, 0);
         return;
