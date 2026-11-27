@@ -1,5 +1,10 @@
 # The guest runtime. Object libraries, so every source is linked into every
 # consumer exactly as the shell scripts linked every object.
+add_library(recomp_miniz STATIC ${POP_ROOT}/third_party/miniz/miniz.c)
+target_include_directories(recomp_miniz PUBLIC ${POP_ROOT}/third_party/miniz)
+set_target_properties(recomp_miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
+pop_optimize(recomp_miniz 2)
+
 set(POP_RUNTIME_SOURCES
   memory.cpp loader.cpp imports.cpp imports_cs.cpp cpu.cpp thunks.cpp seh.cpp msvc_eh.cpp crt_core.cpp crt_strings.cpp crt_math.cpp crt_stdio.cpp crt_startup.cpp crt_cpp.cpp profile.cpp kernel32.cpp kernel32_wide.cpp
   resources.cpp oleaut32.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp
@@ -24,7 +29,7 @@ list(APPEND POP_RUNTIME_SOURCES ${POP_BUNDLED_FONTS_CPP})
 
 add_library(recomp_runtime OBJECT ${POP_RUNTIME_SOURCES})
 target_include_directories(recomp_runtime PUBLIC ${POP_ROOT} ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(recomp_runtime PUBLIC recomp_platform)
+target_link_libraries(recomp_runtime PUBLIC recomp_platform recomp_miniz)
 target_compile_options(recomp_runtime PRIVATE ${POP_WARN_HOST})
 pop_optimize(recomp_runtime 2)
 
@@ -33,7 +38,7 @@ pop_optimize(recomp_runtime 2)
 if(NOT IOS AND NOT ANDROID)
 add_library(recomp_runtime_testing OBJECT ${POP_RUNTIME_SOURCES})
 target_include_directories(recomp_runtime_testing PUBLIC ${POP_ROOT} ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(recomp_runtime_testing PUBLIC recomp_platform)
+target_link_libraries(recomp_runtime_testing PUBLIC recomp_platform recomp_miniz)
 target_compile_definitions(recomp_runtime_testing PUBLIC POPM_TESTING=1)
 target_compile_options(recomp_runtime_testing PRIVATE ${POP_WARN_HOST})
 pop_optimize(recomp_runtime_testing 1)

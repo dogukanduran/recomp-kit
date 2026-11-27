@@ -10,14 +10,11 @@ target_compile_options(host_common PRIVATE ${POP_WARN_HOST})
 pop_optimize(host_common 1)
 
 # The launcher's portable core (host/launcher/): finding, checking and
-# importing the player's game. miniz reads and writes ZIPs.
-add_library(recomp_miniz OBJECT ${POP_ROOT}/third_party/miniz/miniz.c)
-target_include_directories(recomp_miniz PUBLIC ${POP_ROOT}/third_party/miniz)
-set_target_properties(recomp_miniz PROPERTIES POSITION_INDEPENDENT_CODE ON)
-pop_optimize(recomp_miniz 2)
+# importing the player's game. The runtime's miniz library also handles ZIPs.
 add_library(launcher_core OBJECT ${HOST}/launcher/launcher.cpp ${HOST}/launcher/launcher_canvas.cpp
                                  ${HOST}/launcher/launcher_ui.cpp)
 target_include_directories(launcher_core PUBLIC ${POP_ROOT})
+target_link_libraries(launcher_core PUBLIC recomp_miniz)
 target_compile_options(launcher_core PRIVATE ${POP_WARN_STRICT})
 set_target_properties(launcher_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 pop_optimize(launcher_core 1)
@@ -198,7 +195,7 @@ endif()
 # The host's platform file: desktop or iPadOS (host/sdl/platform_ui.h), and
 # the launcher's (host/launcher/launcher_sdl.h; iPadOS keeps its own in
 # platform_ui_ios.mm).
-set(POP_LAUNCHER_SOURCES $<TARGET_OBJECTS:launcher_core> $<TARGET_OBJECTS:recomp_miniz>
+set(POP_LAUNCHER_SOURCES $<TARGET_OBJECTS:launcher_core>
                          ${HOST}/launcher/launcher_config.cpp ${HOST}/launcher/launcher_sdl.cpp)
 if(IOS)
   set(POP_PLATFORM_UI ${HOST}/sdl/platform_ui_ios.mm)
@@ -228,7 +225,7 @@ if(TARGET recomp_gen)
     FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
   pop_link_sdl(pop_smoke)
   if(EMSCRIPTEN)
-    target_link_options(pop_smoke PRIVATE "SHELL:--js-library ${POP_WEBGPU_JS}")
+    target_link_options(pop_smoke PRIVATE "SHELL:--js-library \"${POP_WEBGPU_JS}\"")
     set_property(TARGET pop_smoke APPEND PROPERTY LINK_DEPENDS ${POP_WEBGPU_JS})
   endif()
   # Each target is optional on its own: a game can ship core mods without a
@@ -313,7 +310,7 @@ if(TARGET recomp_gen)
       -sEXPORTED_RUNTIME_METHODS=ENV,callMain,FS,HEAPU8
       --js-library ${POP_ROOT}/web/player/fetch-backend.js
       # SHELL: keeps the flag with its file; CMake removes repeated options.
-      "SHELL:--js-library ${POP_WEBGPU_JS}"
+      "SHELL:--js-library \"${POP_WEBGPU_JS}\""
       --preload-file ${web_resources}@/app/resources)
     set_property(TARGET recomp_app APPEND PROPERTY LINK_DEPENDS ${POP_ROOT}/web/player/fetch-backend.js
                                                                 ${POP_WEBGPU_JS})
@@ -372,7 +369,7 @@ pop_host(host_tests UI_LAYER
 pop_link_sdl(host_tests)
 pop_test_binary(host_tests)
 if(EMSCRIPTEN)
-  target_link_options(host_tests PRIVATE "SHELL:--js-library ${POP_WEBGPU_JS}")
+  target_link_options(host_tests PRIVATE "SHELL:--js-library \"${POP_WEBGPU_JS}\"")
   set_property(TARGET host_tests APPEND PROPERTY LINK_DEPENDS ${POP_WEBGPU_JS})
 endif()
 add_test(NAME host_tests COMMAND host_tests WORKING_DIRECTORY ${POP_ROOT})
