@@ -24,6 +24,7 @@
 
 // Defined in kernel32.cpp with the scheduler.
 void sched_checkpoint();
+static void create_dialog_indirect(X86 *c, uint32_t tpl);
 
 namespace user32 {
 
@@ -238,7 +239,14 @@ uint32_t host_dispatch_to_wndproc(X86 *c, uint32_t hwnd, uint32_t msg, uint32_t 
         LOGV("message %04x for window %08x has no WNDPROC", msg, hwnd);
         return 0;
     }
-    return guest_call(c, proc, hwnd, msg, wparam, lparam);
+    uint32_t result = guest_call(c, proc, hwnd, msg, wparam, lparam);
+    // DLGPROC FALSE delegates an unhandled paint to the dialog manager. A
+    // bare WNDPROC instead owns its validation. Recheck after the callback:
+    // it may destroy or subclass the dialog while handling the message.
+    w = find_window(hwnd);
+    if (!result && msg == 0x000f && w && w->dialog_proc == proc && w->wndproc == proc)
+        w->update_pending = false;
+    return result;
 }
 
 namespace user32 {
@@ -867,9 +875,24 @@ void u_SetDlgItemTextA(X86 *c) {
 }
 
 void u_CreateDialogParamA(X86 *c) {
-    log_once("CreateDialogParamA",
-             "CreateDialogParamA: dialogs are not implemented, returning NULL");
-    set_eax(c, 0);
+    uint32_t name = arg(c, 1);
+    uint32_t wide_name = 0;
+    if (name > 0xffffu) {
+        std::string text = gm_str(name);
+        uint32_t units = wide_units(text) + 1;
+        wide_name = heap_alloc(units * 2);
+        if (!wide_name) {
+            set_eax(c, 0);
+            return;
+        }
+        gm_put_wstr(wide_name, text, units);
+        name = wide_name;
+    }
+    uint32_t size = 0;
+    uint32_t tpl = resource_data(resource_find(5 /* RT_DIALOG */, name), &size);
+    if (wide_name)
+        heap_free(wide_name);
+    ::create_dialog_indirect(c, tpl);
 }
 
 // ---------------------------------------------------------------------------
@@ -1860,6 +1883,12 @@ static void u_wvsprintfA_va(X86 *c, uint32_t out, uint32_t fmt_ptr, uint32_t va)
 
 } // namespace user32
 
+// Public host seam; the implementation uses USER32-owned icon state.
+bool host_cursor_image(uint32_t *version, int32_t *w, int32_t *h,
+                       int32_t *hx, int32_t *hy, const uint32_t **pixels) {
+    return user32::host_cursor_image(version, w, h, hx, hy, pixels);
+}
+
 void win32_refresh_display_window(X86 *c, uint32_t hwnd, uint32_t w, uint32_t h, uint32_t bpp) {
     auto *win = user32::find_window(hwnd);
     if (!win || hwnd == user32::desktop_handle)
@@ -2380,8 +2409,8 @@ static uint32_t dlg_skip_sz_or_ord(uint32_t p, std::string *out = nullptr) {
     if (out) *out = s;
     return p;
 }
-void u_CreateDialogIndirectParamA(X86 *c) {
-    uint32_t hinst = arg(c, 0), tpl = arg(c, 1), parent = arg(c, 2), dlgproc = arg(c, 3), lparam = arg(c, 4);
+static void create_dialog_indirect(X86 *c, uint32_t tpl) {
+    uint32_t hinst = arg(c, 0), parent = arg(c, 2), dlgproc = arg(c, 3), lparam = arg(c, 4);
     if (!tpl || !gm_valid(tpl, 18)) {
         set_eax(c, 0);
         return;
@@ -2426,6 +2455,7 @@ void u_CreateDialogIndirectParamA(X86 *c) {
     Window win;
     win.hwnd = hwnd;
     win.wndproc = dlgproc;
+    win.dialog_proc = dlgproc;
     win.style = style;
     win.exstyle = exstyle;
     win.x = px;
@@ -2544,6 +2574,9 @@ void u_CreateDialogIndirectParamA(X86 *c) {
     window_created(hwnd);
     LOGV("CreateDialogIndirectParamA(\"%s\", %u items) -> %08x", title.c_str(), cdit, hwnd);
     set_eax(c, hwnd);
+}
+void u_CreateDialogIndirectParamA(X86 *c) {
+    create_dialog_indirect(c, arg(c, 1));
 }
 void u_MapDialogRect(X86 *c) {
     uint32_t r = arg(c, 1);

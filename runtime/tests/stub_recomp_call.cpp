@@ -8,6 +8,14 @@
 #include "../thunks.h"
 #include <stdio.h>
 
+// Runtime hook installers link against the generated table's arrays. This
+// fixture has no translated entries (recomp_index_of returns -1), so neither
+// sentinel is accessed, but the symbols must exist in game-specific test builds.
+extern "C" {
+RecompHookFn recomp_hook_ptrs[1] = {};
+uint8_t recomp_hooked[1] = {};
+}
+
 extern "C" void recomp_call(X86 *c, uint32_t target) {
     if (recomp_module_call(c, target))
         return;

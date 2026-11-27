@@ -11,6 +11,7 @@
 #include "packed_asset.h"
 #include "resources.h"
 #include <algorithm>
+#include <cstring>
 
 #include <stdio.h>
 #include <stdlib.h>

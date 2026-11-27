@@ -28,6 +28,7 @@ struct Window {
     gdi::Surface surface;
     uint32_t hwnd = 0;
     uint32_t wndproc = 0;
+    uint32_t dialog_proc = 0; // original DLGPROC; subclasses own their defaults
     uint32_t style = 0, exstyle = 0;
     int32_t x = 0, y = 0, w = 0, h = 0;
     std::string cls, title_utf8;

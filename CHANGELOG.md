@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Resource-backed modeless dialogs reuse the template parser and validate
+  unhandled paint messages through dialog-manager semantics, avoiding a replay
+  startup message storm. Ordinary and subclassed window procedures retain their
+  existing validation behavior.
+- Expose the existing cursor-image host seam to native SDL builds.
+- Quote WebGPU JavaScript helper paths containing spaces and share the runtime
+  miniz target with launcher and test binaries.
+
 - Presenter: `host_present_display_sync` (runtime/display_seam.h) reports, where
   the display itself drives the presenter (a browser's animation frame), the
   measured refresh period and how long the newest frame waited for the refresh

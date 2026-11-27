@@ -6481,6 +6481,85 @@ static void test_host_mouse_routing() {
         call_import(&c, "USER32.dll", "DestroyWindow", {w});
 }
 
+static uint32_t g_dialog_paints = 0, g_dialog_ready_messages = 0;
+
+// A modeless progress dialog defers work until its first paint. Returning FALSE
+// leaves painting to the dialog manager; it must not generate an endless chain
+// of WM_PAINT -> WM_USER while the caller drains messages with PM_REMOVE.
+static void test_dialog_default_paint() {
+    section("modeless dialog default painting");
+    X86 c;
+    loader_init_context(&c);
+    const uint32_t s = 0x00330000, msg = s + 0x100;
+    const uint32_t proc = imports_alloc_trampoline(
+        "test", "progress_dialog",
+        [](X86 *cc) {
+            if (arg(cc, 1) == 0xf) {
+                ++g_dialog_paints;
+                call_import(cc, "USER32.dll", "PostMessageA", {arg(cc, 0), 0x400, 0, 0});
+            } else if (arg(cc, 1) == 0x400)
+                ++g_dialog_ready_messages;
+            set_eax(cc, 0);
+        },
+        4);
+    // Empty standard DLGTEMPLATE: no menu, custom class, title or child items.
+    memset(g_mem + s, 0, 24);
+    wr32(s, 0x10000000); // WS_VISIBLE
+    wr16(s + 14, 100);
+    wr16(s + 16, 60);
+    g_dialog_paints = g_dialog_ready_messages = 0;
+    const uint32_t hwnd =
+        call_import(&c, "USER32.dll", "CreateDialogIndirectParamA", {IMAGE_BASE, s, 0, proc, 0});
+    check(hwnd != 0, "create a modeless dialog with an unhandled paint callback");
+    if (!hwnd)
+        return;
+    auto peek = [&](uint32_t first, uint32_t last) {
+        return call_import(&c, "USER32.dll", "PeekMessageA", {msg, hwnd, first, last, 1});
+    };
+    call_import(&c, "USER32.dll", "InvalidateRect", {hwnd, 0, 0});
+    check(peek(0xf, 0xf) == 1, "modeless dialog retrieves its pending paint");
+    call_import(&c, "USER32.dll", "DispatchMessageA", {msg});
+    check(g_dialog_paints == 1 && peek(0x400, 0x400) == 1,
+          "dialog paint posts its deferred work message once");
+    call_import(&c, "USER32.dll", "DispatchMessageA", {msg});
+    check(g_dialog_ready_messages == 1 && peek(0xf, 0xf) == 0 && peek(0x400, 0x400) == 0,
+          "default dialog painting validates the region and stops the message chain");
+    call_import(&c, "USER32.dll", "InvalidateRect", {hwnd, 0, 0});
+    call_import(&c, "USER32.dll", "UpdateWindow", {hwnd});
+    check(g_dialog_paints == 2 && peek(0xf, 0xf) == 0 && peek(0x400, 0x400) == 1,
+          "synchronous UpdateWindow also performs dialog default painting");
+    call_import(&c, "USER32.dll", "DispatchMessageA", {msg});
+    check(g_dialog_ready_messages == 2 && peek(0x400, 0x400) == 0,
+          "each explicit invalidation posts exactly one deferred work message");
+
+    const uint32_t ordinary = imports_alloc_trampoline(
+        "test", "unvalidated_window_paint",
+        [](X86 *cc) { set_eax(cc, arg(cc, 1) == 0x81 ? 1 : 0); }, 4);
+    const uint32_t old =
+        call_import(&c, "USER32.dll", "SetWindowLongA", {hwnd, 0xfffffffcu, ordinary});
+    check(old == proc, "subclass the dialog with an ordinary window procedure");
+    call_import(&c, "USER32.dll", "InvalidateRect", {hwnd, 0, 0});
+    check(peek(0xf, 0xf) == 1, "subclassed dialog retrieves its pending paint");
+    call_import(&c, "USER32.dll", "DispatchMessageA", {msg});
+    check(peek(0xf, 0xf) == 1, "ordinary subclass WNDPROC must validate its own paint region");
+    call_import(&c, "USER32.dll", "DestroyWindow", {hwnd});
+
+    const uint32_t wc = s + 0x200, name = s + 0x280;
+    memset(g_mem + wc, 0, 40);
+    wr32(wc + 4, ordinary);
+    gm_put_str(name, "UnvalidatedPaintWindow", 32);
+    wr32(wc + 36, name);
+    call_import(&c, "USER32.dll", "RegisterClassA", {wc});
+    const uint32_t window =
+        call_import(&c, "USER32.dll", "CreateWindowExA",
+                    {0, name, 0, 0x10000000, 0, 0, 100, 60, 0, 0, IMAGE_BASE, 0});
+    check(window != 0, "create an ordinary window with an unhandled paint callback");
+    call_import(&c, "USER32.dll", "UpdateWindow", {window});
+    check(call_import(&c, "USER32.dll", "PeekMessageA", {msg, window, 0xf, 0xf, 1}) == 1,
+          "ordinary WNDPROC paint remains pending until explicitly validated");
+    call_import(&c, "USER32.dll", "DestroyWindow", {window});
+}
+
 static void test_user32_services() {
     section("menus, scrollbars, clipboard, resources and drawing");
     X86 c;
@@ -6970,7 +7049,8 @@ int main(int argc, char **argv) {
     if (!recomp_env("LOG"))
         os_setenv("RECOMP_LOG", "1");
     if (argc == 2 &&
-        (strcmp(argv[1], "--pulse-only") == 0 || strcmp(argv[1], "--mm-timers-only") == 0)) {
+        (strcmp(argv[1], "--pulse-only") == 0 || strcmp(argv[1], "--mm-timers-only") == 0 ||
+         strcmp(argv[1], "--dialog-paint-only") == 0)) {
         mem_init();
         imports_init();
         win32_init(".");
@@ -6979,8 +7059,10 @@ int main(int argc, char **argv) {
         scratch = 0x0ee00000;
         if (strcmp(argv[1], "--pulse-only") == 0)
             test_pulse_events(c);
-        else
+        else if (strcmp(argv[1], "--mm-timers-only") == 0)
             test_mm_timer_thread(c);
+        else
+            test_dialog_default_paint();
         printf("runtime focused: %d checks, %d failures\n", g_checks, g_failures);
         return g_failures ? 1 : 0;
     }
@@ -7063,6 +7145,7 @@ int main(int argc, char **argv) {
     test_user32_vcl();
     test_user32_window_model();
     test_host_mouse_routing();
+    test_dialog_default_paint();
     test_user32_services();
     X86 *c = loader_context();
     if (child)
