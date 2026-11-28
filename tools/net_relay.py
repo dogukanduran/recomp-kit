@@ -220,6 +220,15 @@ class _Client:
             self._handle_close(sid)
 
     def _handle_connect(self, sid, target_ip, target_port):
+        # Virtual gateway 10.0.0.1 routes WormNET HTTP (80/17080) and IRC (6667) to local WormNET server
+        if target_ip == 0x0A000001 or (target_ip == 0x7F000001 and target_port in (17080, 6667)):
+            mapped_port = 17080 if target_port in (80, 17080) else target_port
+            threading.Thread(
+                target=self._bridge_outbound_tcp,
+                args=(sid, 0x7F000001, mapped_port),
+                daemon=True,
+            ).start()
+            return
         if target_ip == 0x7F000001:  # 127.0.0.1 -> self
             target_ip = self.ip
         host_match = None
@@ -281,12 +290,11 @@ class _Client:
             return
 
         with self.hub.lock:
-            info = self.sockets.get(sid)
-            if not info:
-                ext.close()
-                return
+            info = self.sockets.setdefault(
+                sid, {"proto": 6, "port": 0, "listening": False, "peer": None, "ext_sock": None}
+            )
             info["ext_sock"] = ext
-        self.send_packet(struct.pack("!BIIIH", OP_CONNECT_RESULT, sid, 0, self.ip, 0))
+        self.send_packet(struct.pack("!BIIIH", OP_CONNECT_RESULT, sid, 0, self.ip, info["port"] or 49152))
 
         try:
             while not self.closed:

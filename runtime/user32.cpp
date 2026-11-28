@@ -364,6 +364,10 @@ void create_window_body(X86 *c, bool wide) {
         w = 640;
     if (h == (int32_t)0x80000000)
         h = 480;
+    if (w < 0)
+        w = 0;
+    if (h < 0)
+        h = 0;
 
     uint32_t hwnd = g_next_hwnd;
     g_next_hwnd += 4;
@@ -540,6 +544,12 @@ void set_window_pos(X86 *c, Window *w, uint32_t after, int32_t x, int32_t y, int
         reorder_window(w->hwnd, after);
     // A WM_SIZE handler may set the same size while arranging children.
     // Only actual changes notify it again, or paint is starved forever.
+    if (!(flags & 0x0001)) {
+        if (cx < 0)
+            cx = 0;
+        if (cy < 0)
+            cy = 0;
+    }
     bool moved = !(flags & 0x0002) && (w->x != x || w->y != y);
     bool sized = !(flags & 0x0001) && (refresh_size || w->w != cx || w->h != cy);
     if (moved) {
@@ -1367,10 +1377,13 @@ void def_window_proc(X86 *c, bool wide) {
     case 0x0014: // WM_ERASEBKGND: the background counts as erased
         set_eax(c, 1);
         return;
-    case 0x0010: // WM_CLOSE -> DestroyWindow
+    case 0x0010: { // WM_CLOSE -> DestroyWindow
+        const bool is_top_level = w && !(w->style & 0x40000000u) && !w->parent;
         destroy_window(c, hwnd);
-        host_post_message(0, 0x0012 /* WM_QUIT */, 0, 0);
+        if (is_top_level)
+            host_post_message(0, 0x0012 /* WM_QUIT */, 0, 0);
         break;
+    }
     default:
         break;
     }

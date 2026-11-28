@@ -351,8 +351,9 @@ void w_gethostbyname(X86 *c) {
         std::lock_guard<std::mutex> lk(g_mu);
         ip_host = g_virtual_ip;
     } else if (!parse_ipv4(name.c_str(), ip_host)) {
-        fail_wsa(c, 0, WSAHOST_NOT_FOUND_);
-        return;
+        // Route external hostnames (e.g. wormnet1.team17.com, serverlist.worms2d.info)
+        // to the virtual relay gateway (10.0.0.1).
+        ip_host = 0x0a000001u;
     }
     // Static guest buffer for hostent + addr list
     static uint32_t buf = 0;

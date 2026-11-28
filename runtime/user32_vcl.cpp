@@ -71,6 +71,14 @@ void reorder_window(uint32_t hwnd, uint32_t after) {
 }
 // Descend only through an eligible parent. A hidden/disabled modal owner and
 // its children cannot intercept input; an owned popup remains a top-level peer.
+// BS_GROUPBOX (button style 0x07) returns HTTRANSPARENT on Windows so mouse
+// hit-testing and WindowFromPoint pass through group frames to controls inside.
+static bool is_groupbox(const Window *w) {
+    if (!w || (w->style & 0x0fu) != 0x07u)
+        return false;
+    return w->cls == "Button" || w->cls == "button" || w->cls == "BUTTON" || w->cls == "#128";
+}
+
 uint32_t mouse_window(uint32_t parent, int32_t x, int32_t y, size_t depth = 0) {
     if (depth > windows().size())
         return 0;
@@ -79,8 +87,8 @@ uint32_t mouse_window(uint32_t parent, int32_t x, int32_t y, size_t depth = 0) {
         auto *w = find_window(*i);
         int32_t wx, wy;
         client_origin(*i, &wx, &wy);
-        if (!w->visible || !w->enabled || x < wx || y < wy || int64_t(x) >= int64_t(wx) + w->w ||
-            int64_t(y) >= int64_t(wy) + w->h)
+        if (!w->visible || !w->enabled || is_groupbox(w) || x < wx || y < wy ||
+            int64_t(x) >= int64_t(wx) + w->w || int64_t(y) >= int64_t(wy) + w->h)
             continue;
         uint32_t child = mouse_window(*i, x, y, depth + 1);
         return child ? child : *i;
