@@ -6479,6 +6479,30 @@ static void test_host_mouse_routing() {
     }
     for (uint32_t w : {top, ordinary, hidden, disabled})
         call_import(&c, "USER32.dll", "DestroyWindow", {w});
+    // Rapid clicks on a CS_DBLCLKS window synthesise WM_LBUTTONDBLCLK.
+    {
+        uint32_t dcls = put_str("DblClkWnd");
+        uint32_t dwc = scratch_block(40);
+        wr32(dwc + 0, 0x0008); // CS_DBLCLKS
+        wr32(dwc + 4, imports_resolve("USER32.dll", "DefWindowProcA"));
+        wr32(dwc + 36, dcls);
+        call_import(&c, "USER32.dll", "RegisterClassA", {dwc});
+        uint32_t dwnd = call_import(&c, "USER32.dll", "CreateWindowExA",
+                                    {0, dcls, put_str("d"), 0x10000000u, 200, 200, 80, 80, 0, 0,
+                                     0x400000, 0});
+        call_import(&c, "USER32.dll", "SetActiveWindow", {dwnd});
+        host_post_mouse_message(0x201, 1, 220, 220);
+        check(call_import(&c, "USER32.dll", "PeekMessageW", {msg, 0, 0x200, 0x209, 1}) == 1 &&
+                  rd32(msg + 4) == 0x201,
+              "first click delivers WM_LBUTTONDOWN");
+        host_post_mouse_message(0x202, 0, 220, 220);
+        call_import(&c, "USER32.dll", "PeekMessageW", {msg, 0, 0x200, 0x209, 1});
+        host_post_mouse_message(0x201, 1, 221, 221);
+        check(call_import(&c, "USER32.dll", "PeekMessageW", {msg, 0, 0x200, 0x209, 1}) == 1 &&
+                  rd32(msg + 4) == 0x203,
+              "second rapid click on CS_DBLCLKS window delivers WM_LBUTTONDBLCLK");
+        call_import(&c, "USER32.dll", "DestroyWindow", {dwnd});
+    }
 }
 
 static uint32_t g_dialog_paints = 0, g_dialog_ready_messages = 0;

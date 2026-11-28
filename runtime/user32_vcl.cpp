@@ -21,6 +21,12 @@ struct MouseInput {
 };
 std::deque<MouseInput> mouse_input;
 bool routing_mouse = false;
+struct LastClick {
+    uint32_t hwnd = 0, time = 0;
+    int32_t x = 0, y = 0;
+    bool valid = false;
+};
+LastClick last_click[3];
 struct Timer {
     uint32_t hwnd, id, interval, due, callback, thread;
 };
@@ -95,6 +101,20 @@ uint32_t mouse_window(uint32_t parent, int32_t x, int32_t y, size_t depth = 0) {
     }
     return 0;
 }
+static bool class_accepts_dblclk(const Window *w) {
+    if (!w || w->cls.empty())
+        return false;
+    auto it = classes().find(w->cls);
+    if (it == classes().end()) {
+        std::string low = w->cls;
+        for (char &ch : low)
+            if (ch >= 'A' && ch <= 'Z')
+                ch = char(ch + ('a' - 'A'));
+        it = classes().find(low);
+    }
+    return it != classes().end() && (it->second.style & 0x0008u) != 0;
+}
+
 // Host events carry screen points until the guest retrieves input. Only here
 // can activation synchronously invoke a guest WNDPROC. One event per pump lets
 // the preceding press establish capture before its subsequent move/release.
@@ -138,15 +158,30 @@ void pump_mouse_input(X86 *c) {
         if (result == 2 || result == 4)
             return; // MA_*ANDEAT
     }
-    if (!find_window(hwnd))
+    Window *target = find_window(hwnd);
+    if (!target)
         return; // activation may destroy its recipient
+    uint32_t out_msg = input.message;
+    if (press) {
+        int btn = input.message == 0x201 ? 0 : (input.message == 0x204 ? 1 : 2);
+        LastClick &lc = last_click[btn];
+        const int32_t dx = input.x >= lc.x ? input.x - lc.x : lc.x - input.x;
+        const int32_t dy = input.y >= lc.y ? input.y - lc.y : lc.y - input.y;
+        if (lc.valid && lc.hwnd == hwnd && uint32_t(input.time - lc.time) <= 500u && dx <= 4 &&
+            dy <= 4 && class_accepts_dblclk(target)) {
+            out_msg = input.message + 2u; // WM_*BUTTONDOWN (0x201/4/7) -> WM_*BUTTONDBLCLK (0x203/6/9)
+            lc.valid = false;
+        } else {
+            lc = {hwnd, input.time, input.x, input.y, true};
+        }
+    }
     int32_t x, y;
     client_origin(hwnd, &x, &y);
     uint32_t lp = (uint32_t(uint16_t(int64_t(input.y) - y)) << 16) | uint16_t(int64_t(input.x) - x);
-    LOGV("host mouse %04x screen=(%d,%d) -> hwnd=%08x client=(%d,%d) mk=%x", input.message, input.x,
+    LOGV("host mouse %04x screen=(%d,%d) -> hwnd=%08x client=(%d,%d) mk=%x", out_msg, input.x,
          input.y, hwnd, int16_t(lp), int16_t(lp >> 16), input.mk);
     queue().push_back(
-        {hwnd, input.message, input.mk, lp, input.time, uint32_t(input.x), uint32_t(input.y)});
+        {hwnd, out_msg, input.mk, lp, input.time, uint32_t(input.x), uint32_t(input.y)});
 }
 // Queue each expired timer at most once. Signed subtraction handles DWORD
 // clock wrap; no host thread mutates guest memory or invokes a callback here.
